@@ -4,7 +4,6 @@
 // already ported); the rest will be deleted. Do not extend this file --
 // new dashboard work belongs in the deepresearch frontend / platform
 // backend, not here.
-//
 package apiserver
 
 import (
@@ -34,13 +33,13 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 
-	"github.com/sirus20x6/adamaton-delegator/delegator"
-	"github.com/sirus20x6/adamaton-platform/temporal/gitea"
-	"github.com/sirus20x6/adamaton-delegator/delegator/llm"
 	"github.com/sirus20x6/adamaton-core/metrics"
-	"github.com/sirus20x6/adamaton-evolve/workflow-builder/pluginloader"
 	"github.com/sirus20x6/adamaton-core/types"
+	"github.com/sirus20x6/adamaton-delegator/delegator"
+	"github.com/sirus20x6/adamaton-delegator/delegator/llm"
+	"github.com/sirus20x6/adamaton-evolve/workflow-builder/pluginloader"
 	"github.com/sirus20x6/adamaton-evolve/workflow-builder/workflowstore"
+	"github.com/sirus20x6/adamaton-platform/temporal/gitea"
 	"github.com/sirus20x6/adamaton-platform/temporal/workflows"
 )
 
@@ -397,6 +396,7 @@ func (s *APIServer) setupRoutes() {
 	// dispatch surface — POST /jobs/submit starts a DispatchWorkflow
 	// which routes the job onto a capable worker's task queue.
 	s.registerWorkerEndpoints(api)
+	s.registerRacksEndpoint(api)
 	s.registerJobsEndpoints(api)
 
 	// Cross-subsystem status fan-out for the unified landing page.
