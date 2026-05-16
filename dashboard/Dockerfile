@@ -10,7 +10,14 @@
 #
 # bin/adam ship pi5 evo-api handles this; ship_service_spec sets context=".".
 
-FROM golang:1.25-trixie AS build
+# Cross-compile in a native-platform stage so we don't pay the qemu
+# tax for an arm64 image built on amd64. --platform=$BUILDPLATFORM pins
+# this stage to whatever the BUILDER is (the workstation = amd64); the
+# Go toolchain handles GOARCH=$TARGETARCH for us. A full qemu-emulated
+# `go build` of the dashboard takes 30+ minutes; cross-compile takes
+# ~30 seconds.
+FROM --platform=$BUILDPLATFORM golang:1.25-trixie AS build
+ARG TARGETARCH
 WORKDIR /src
 # Copy every sub-repo because dashboard/go.mod's replace directives
 # reach across to ../../core, ../../knowledge/*, ../../delegator/*,
@@ -27,7 +34,7 @@ COPY evolve ./evolve
 COPY platform ./platform
 
 WORKDIR /src
-RUN CGO_ENABLED=0 GOOS=linux \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags='-s -w' \
     -o /out/api ./platform/dashboard/cmd/api
 
