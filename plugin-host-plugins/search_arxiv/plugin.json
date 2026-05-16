@@ -1,0 +1,23 @@
+{
+  "id": "search_arxiv",
+  "name": "arXiv",
+  "description": "arXiv adapter built on the arxiv PyPI package; Atom XML wrapped in async over a thread pool.",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query", "search.fetch"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_arxiv"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

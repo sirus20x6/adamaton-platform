@@ -1,0 +1,14 @@
+[Unit]
+Description=Run ccsaver-mirror every minute
+Documentation=https://github.com/sirus20x6/evo/tree/main/dashboard/ccsaver-mirror
+
+[Timer]
+# 30s after boot so we get an early snapshot, then every 60s.
+# Persistent=false because if the workstation was offline the missed
+# windows aren't interesting — the next tick refreshes the snapshot.
+OnBootSec=30
+OnUnitActiveSec=60
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

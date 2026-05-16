@@ -1,0 +1,11 @@
+pyproject.toml
+src/dr_plugin_search_linkup/__init__.py
+src/dr_plugin_search_linkup/__main__.py
+src/dr_plugin_search_linkup/adapter.py
+src/dr_plugin_search_linkup/plugin.py
+src/dr_plugin_search_linkup.egg-info/PKG-INFO
+src/dr_plugin_search_linkup.egg-info/SOURCES.txt
+src/dr_plugin_search_linkup.egg-info/dependency_links.txt
+src/dr_plugin_search_linkup.egg-info/requires.txt
+src/dr_plugin_search_linkup.egg-info/top_level.txt
+tests/test_query.py

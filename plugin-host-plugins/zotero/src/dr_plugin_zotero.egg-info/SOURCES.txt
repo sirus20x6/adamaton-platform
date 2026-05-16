@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+src/dr_plugin_zotero/__init__.py
+src/dr_plugin_zotero/__main__.py
+src/dr_plugin_zotero/client.py
+src/dr_plugin_zotero/dedup.py
+src/dr_plugin_zotero/normalize.py
+src/dr_plugin_zotero/plugin.py
+src/dr_plugin_zotero/sqlite_reader.py
+src/dr_plugin_zotero/sync.py
+src/dr_plugin_zotero.egg-info/PKG-INFO
+src/dr_plugin_zotero.egg-info/SOURCES.txt
+src/dr_plugin_zotero.egg-info/dependency_links.txt
+src/dr_plugin_zotero.egg-info/requires.txt
+src/dr_plugin_zotero.egg-info/top_level.txt
+tests/test_plugin.py

@@ -1,0 +1,33 @@
+{
+  "id": "search_jina",
+  "name": "Jina",
+  "description": "Jina s.jina.ai web search; LLM-cleaned markdown content surfaced on abstract.",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query", "search.fetch"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_jina"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "JINA_API_KEY": {
+        "type": "string",
+        "description": "Optional Jina API key. Without it the public endpoint is used with tight rate limits."
+      },
+      "JINA_BASE_URL": {
+        "type": "string",
+        "description": "Override the default https://s.jina.ai endpoint.",
+        "default": "https://s.jina.ai"
+      }
+    },
+    "required": []
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

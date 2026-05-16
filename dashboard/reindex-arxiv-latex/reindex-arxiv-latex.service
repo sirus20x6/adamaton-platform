@@ -1,0 +1,21 @@
+[Unit]
+Description=Re-ingest arxiv papers via the LaTeX path
+ConditionPathExists=/home/sirus/reindex-arxiv-latex.sh
+# Cap restart storms: 5 failures within 10 min disables the unit.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /home/sirus/reindex-arxiv-latex.sh
+WorkingDirectory=/home/sirus
+StandardOutput=append:/home/sirus/reindex.log
+StandardError=inherit
+
+# Restart only when the script exits non-zero (crash, kill, SIGTERM).
+# Clean completion (queue drained) exits 0 — leave it alone.
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

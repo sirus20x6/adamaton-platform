@@ -1,0 +1,28 @@
+{
+  "id": "search_github",
+  "name": "GitHub",
+  "description": "GitHub repository / code search; fetch() returns the README as markdown. Auth via GITHUB_TOKEN.",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query", "search.fetch"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_github"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "GITHUB_TOKEN": {
+        "type": "string",
+        "description": "GitHub personal access token. Lifts the unauth 60 req/hr rate cap to 5000 req/hr."
+      }
+    },
+    "required": []
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

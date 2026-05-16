@@ -1,0 +1,28 @@
+{
+  "id": "search_semantic_scholar",
+  "name": "Semantic Scholar",
+  "description": "Semantic Scholar Graph API v1 adapter; keyless by default, supports SEMANTIC_SCHOLAR_API_KEY.",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query", "search.fetch"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_semantic_scholar"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "SEMANTIC_SCHOLAR_API_KEY": {
+        "type": "string",
+        "description": "Optional API key; lifts the heavy public rate limits."
+      }
+    },
+    "required": []
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

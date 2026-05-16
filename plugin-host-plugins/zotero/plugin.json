@@ -1,0 +1,34 @@
+{
+  "id": "zotero",
+  "name": "Zotero",
+  "description": "Sync your Zotero library into the platform corpus.",
+  "version": "0.1.0",
+  "category": "importer",
+  "capabilities": ["importer.list_collections", "importer.sync"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_zotero"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "source": {
+        "type": "string",
+        "enum": ["web_api", "sqlite_upload"],
+        "description": "How to ingest: Zotero Web API or a local SQLite dump"
+      },
+      "api_key": { "type": "string", "description": "Zotero Web API key" },
+      "library_type": { "type": "string", "enum": ["user", "group"] },
+      "library_id": { "type": "string" },
+      "sqlite_path": { "type": "string", "description": "Server-side path to the uploaded zotero.sqlite" },
+      "storage_dir": { "type": "string", "description": "Server-side path to the unpacked storage/ dir" }
+    },
+    "required": ["source"]
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "only_with_pdf": { "type": "boolean", "default": false },
+      "since": { "type": "integer", "description": "Zotero version cursor (web_api only)" }
+    }
+  },
+  "supervisor": { "idle_timeout_seconds": 600, "max_restart_per_min": 3 }
+}

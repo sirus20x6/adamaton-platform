@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+src/dr_plugin_search_wiki_crawler/__init__.py
+src/dr_plugin_search_wiki_crawler/__main__.py
+src/dr_plugin_search_wiki_crawler/adapter.py
+src/dr_plugin_search_wiki_crawler/plugin.py
+src/dr_plugin_search_wiki_crawler.egg-info/PKG-INFO
+src/dr_plugin_search_wiki_crawler.egg-info/SOURCES.txt
+src/dr_plugin_search_wiki_crawler.egg-info/dependency_links.txt
+src/dr_plugin_search_wiki_crawler.egg-info/requires.txt
+src/dr_plugin_search_wiki_crawler.egg-info/top_level.txt
+src/dr_plugin_search_wiki_crawler/wiki_crawler/__init__.py
+src/dr_plugin_search_wiki_crawler/wiki_crawler/common.py
+src/dr_plugin_search_wiki_crawler/wiki_crawler/fandom.py
+src/dr_plugin_search_wiki_crawler/wiki_crawler/lexicanum.py
+src/dr_plugin_search_wiki_crawler/wiki_crawler/tvtropes.py
+tests/test_query.py

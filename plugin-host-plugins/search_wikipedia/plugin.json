@@ -1,0 +1,28 @@
+{
+  "id": "search_wikipedia",
+  "name": "Wikipedia",
+  "description": "Wikipedia opensearch + REST page-HTML adapter. fetch() returns markdownified article body with reference/infobox cruft stripped.",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query", "search.fetch"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_wikipedia"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "WIKIPEDIA_LANGUAGE": {
+        "type": "string",
+        "description": "Wikipedia language subdomain (e.g. 'en', 'de', 'fr'). Default 'en'."
+      }
+    },
+    "required": []
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

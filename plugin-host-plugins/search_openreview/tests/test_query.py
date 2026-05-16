@@ -1,0 +1,33 @@
+"""Smoke test for the openreview search plugin."""
+
+from __future__ import annotations
+
+import os
+
+import pytest
+
+from dr_plugin_search_openreview.plugin import Plugin
+from dr_plugin_sdk.types import SearchPage
+
+
+pytestmark = pytest.mark.asyncio
+
+
+@pytest.mark.skipif(
+    not os.getenv("PLUGIN_LIVE_TEST"),
+    reason="openreview requires the live API; set PLUGIN_LIVE_TEST=1",
+)
+async def test_query_live() -> None:
+    plugin = Plugin()
+    page = await plugin.query("diffusion model", 3, None, None)
+    assert isinstance(page, SearchPage)
+    if page.results:
+        first = page.results[0]
+        assert first.adapter == "openreview"
+        assert first.title
+
+
+async def test_plugin_instantiates() -> None:
+    plugin = Plugin()
+    assert plugin._adapter.name == "openreview"
+    await plugin._adapter.aclose()
