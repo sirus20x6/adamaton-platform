@@ -287,11 +287,17 @@ func (s *server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }
 
-// compose shells out to `docker compose -f <composeDir>/docker-compose.yml`
-// with the agent's standard working directory. Combined output is
-// returned so the caller can stream it back to the workstation.
+// compose shells out to docker compose with the agent's working
+// directory + both env files passed via --env-file. The second
+// --env-file is required because compose only uses vars from the
+// auto-loaded .env (or --env-file) for ${VAR} template substitution
+// in image:/volumes:/etc.; service-block env_file: only populates
+// container environments. Without this the per-image
+// ${ADAMATON_<SVC>_TAG} placeholders would always fall through to
+// their :-main defaults regardless of image-tags.env contents.
 func (s *server) compose(ctx context.Context, args ...string) ([]byte, error) {
-	full := append([]string{"compose"}, args...)
+	full := []string{"compose", "--env-file", ".env", "--env-file", "image-tags.env"}
+	full = append(full, args...)
 	cmd := exec.CommandContext(ctx, s.composeBin, full...)
 	cmd.Dir = s.composeDir
 	return cmd.CombinedOutput()
