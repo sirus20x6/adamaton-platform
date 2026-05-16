@@ -4,7 +4,6 @@
 // already ported); the rest will be deleted. Do not extend this file --
 // new dashboard work belongs in the deepresearch frontend / platform
 // backend, not here.
-//
 package apiserver
 
 import (
@@ -34,13 +33,13 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 
-	"github.com/sirus20x6/adamaton-delegator/delegator"
-	"github.com/sirus20x6/adamaton-platform/temporal/gitea"
-	"github.com/sirus20x6/adamaton-delegator/delegator/llm"
 	"github.com/sirus20x6/adamaton-core/metrics"
-	"github.com/sirus20x6/adamaton-evolve/workflow-builder/pluginloader"
 	"github.com/sirus20x6/adamaton-core/types"
+	"github.com/sirus20x6/adamaton-delegator/delegator"
+	"github.com/sirus20x6/adamaton-delegator/delegator/llm"
+	"github.com/sirus20x6/adamaton-evolve/workflow-builder/pluginloader"
 	"github.com/sirus20x6/adamaton-evolve/workflow-builder/workflowstore"
+	"github.com/sirus20x6/adamaton-platform/temporal/gitea"
 	"github.com/sirus20x6/adamaton-platform/temporal/workflows"
 )
 
@@ -64,6 +63,69 @@ func maxInflightWorkflows() int {
 		return defaultMaxInflightWorkflows
 	}
 	return n
+}
+
+// resolvePluginDirs picks the plugin-YAML search paths for the workflow-node
+// loader. Precedence:
+//
+//  1. EVO_PLUGIN_DIRS — colon-separated, honored verbatim (absolute paths
+//     expected). Lets operators point at any layout (e.g. a shared mount).
+//  2. EVO_HOME/plugins/{builtin,community,n8n} — the canonical layout the
+//     Pi5 docker image and the /opt/evo systemd unit both install into.
+//  3. ./plugins/{builtin,community,n8n} — last-resort relative paths, kept
+//     for dev runs from the workflow-builder source tree.
+//
+// The previous hard-coded relative list silently loaded zero nodes in
+// production because the docker image's WORKDIR is /, not the source tree.
+func resolvePluginDirs() []string {
+	if raw := os.Getenv("EVO_PLUGIN_DIRS"); raw != "" {
+		parts := strings.Split(raw, ":")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	base := os.Getenv("EVO_HOME")
+	if base == "" {
+		base = "/opt/evo"
+	}
+	canonical := []string{
+		filepath.Join(base, "plugins", "builtin"),
+		filepath.Join(base, "plugins", "community"),
+		filepath.Join(base, "plugins", "n8n"),
+	}
+	if _, err := os.Stat(canonical[0]); err == nil {
+		return canonical
+	}
+	// Dev fallback: walk upward from cwd looking for the umbrella's
+	// evolve/workflow-builder/plugins/builtin tree. Lets `go run ./cmd/api`
+	// from anywhere inside the umbrella checkout find the catalog without
+	// requiring EVO_PLUGIN_DIRS to be set.
+	if cwd, err := os.Getwd(); err == nil {
+		for cur := cwd; ; {
+			candidate := filepath.Join(cur, "evolve", "workflow-builder", "plugins", "builtin")
+			if _, err := os.Stat(candidate); err == nil {
+				root := filepath.Dir(candidate) // .../plugins
+				return []string{
+					filepath.Join(root, "builtin"),
+					filepath.Join(root, "community"),
+					filepath.Join(root, "n8n"),
+				}
+			}
+			parent := filepath.Dir(cur)
+			if parent == cur {
+				break
+			}
+			cur = parent
+		}
+	}
+	// Last-resort relative paths (dev run from workflow-builder source tree).
+	return []string{"plugins/builtin", "plugins/community", "plugins/n8n"}
 }
 
 // temporalStarter is the narrow slice of client.Client the mutation handlers
@@ -273,11 +335,18 @@ func NewAPIServer(config *types.Config, logger *logrus.Logger) (*APIServer, erro
 		}
 	}
 
-	// Load plugin nodes from YAML files
-	pl := pluginloader.NewLoader([]string{"plugins/builtin", "plugins/community", "plugins/n8n"}, logger)
+	// Load plugin nodes from YAML files. Paths come from EVO_PLUGIN_DIRS
+	// (colon-separated absolute paths) so the same binary works from any
+	// working directory. Without that env var, fall back to EVO_HOME's
+	// canonical layout (matches the Pi docker image's COPY destination
+	// and the systemd unit's WorkingDirectory=/opt/evo). The pre-existing
+	// relative-path list silently loaded zero nodes when the binary ran
+	// from a WORKDIR other than the workflow-builder source tree.
+	pl := pluginloader.NewLoader(resolvePluginDirs(), logger)
 	if err := pl.LoadAll(); err != nil {
 		logger.WithError(err).Warn("Failed to load plugins")
 	}
+	logger.WithField("count", pl.Count()).Info("Plugin loader initialized")
 
 	// Build a Gitea client when Gitea is configured. Without it, the
 	// triggerWorkflow handler can't look up the PR head SHA — the workflow
