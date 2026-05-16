@@ -1,0 +1,79 @@
+# Rack manifest mirror — consumed by /api/v1/racks.
+#
+# Hand-maintained mirror of the per-host MANIFEST.yaml files in
+# Adamaton/deploy/<host>/. The dashboard is a Go module and cannot
+# go:embed files outside its own tree, so this file is the embedded
+# copy. When you change deploy/<host>/MANIFEST.yaml, also update the
+# matching block here.
+#
+# Per-host fields:
+#   host       — logical rack name (also used as identity suffix for
+#                workers, e.g. nano-research-worker@pi5).
+#   aliases    — alternate suffix values that should match this rack
+#                when a worker's IdentityOverride uses a legacy
+#                hostname (pi5 historically registered as @pi).
+#   image_tag  — informational copy of deploy/<host>/MANIFEST.yaml
+#                image_tag; bin/adam fleet promote keeps both in sync.
+#   workers    — services that self-register via core/workerregistry.
+#                Each entry's service name must equal evo.workers.identity.
+#   sidecars   — long-running HTTP services that DON'T self-register
+#                (Python figure-renderer, Python reranker, Zig latex2text,
+#                etc.). Surfaced so the UI can show them as nodes.
+#   services   — supporting infra (postgres, temporal, caddy, dashboard,
+#                frontend). Included for completeness but typically
+#                hidden by the Nodes view.
+
+racks:
+  - host: pi5
+    aliases: [pi, pi5]
+    image_tag: main
+    workers:
+      - skills-worker
+      - skills-rae-worker
+      - reindex-worker
+      - dispatch-worker
+      - nano-research-worker
+      - temporal-worker
+      - evo-worker
+    sidecars:
+      - reranker
+      - figure-renderer
+      - skills-rae
+      - r2g
+      - nano-research
+      - plugin-host
+    services:
+      - postgres
+      - temporal
+      - caddy
+      - dashboard
+      - frontend
+
+  - host: pi5-speaker
+    aliases: [pi5-speaker]
+    image_tag: main
+    workers:
+      - nano-research-worker
+    sidecars:
+      - figure-renderer
+    services: []
+
+  - host: blackwell
+    aliases: [blackwell]
+    image_tag: main
+    workers:
+      - evo-worker
+    sidecars:
+      - bge-sidecar
+      - octen-sidecar
+      - cluster-sidecar
+      - vllm
+    services: []
+
+  - host: workstation
+    aliases: [workstation]
+    image_tag: main
+    workers: []
+    sidecars:
+      - cluster-sidecar
+    services: []
