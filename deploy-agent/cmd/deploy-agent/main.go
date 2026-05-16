@@ -232,7 +232,11 @@ func (s *server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"step": "pull", "error": err.Error(), "output": string(pullOut)})
 		return
 	}
-	upOut, err := s.compose(ctx, "up", "-d", svc)
+	// --no-deps so a single-service ship doesn't recreate the rest of the
+	// stack (postgres, temporal, etc.). Without this, any drift in their
+	// compose blocks since the last `compose up` triggers a full recreate
+	// cascade -- which is how a ship of evo-api once cycled postgres.
+	upOut, err := s.compose(ctx, "up", "-d", "--no-deps", svc)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"step": "up", "error": err.Error(), "output": string(upOut)})
 		return
@@ -276,7 +280,7 @@ func (s *server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 			results = append(results, map[string]any{"service": svc, "step": "pull", "error": err.Error(), "output": tail(string(pullOut), 20)})
 			continue
 		}
-		upOut, err := s.compose(ctx, "up", "-d", svc)
+		upOut, err := s.compose(ctx, "up", "-d", "--no-deps", svc)
 		cancel()
 		if err != nil {
 			results = append(results, map[string]any{"service": svc, "step": "up", "error": err.Error(), "output": tail(string(upOut), 20)})
