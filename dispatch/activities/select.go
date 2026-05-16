@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirupsen/logrus"
 
-	"github.com/sirus20x6/adamomaton-platform/dispatch/workflows"
+	"github.com/sirus20x6/adamaton-platform/dispatch/workflows"
 )
 
 // SelectActivities is the activity struct that owns candidate-selection

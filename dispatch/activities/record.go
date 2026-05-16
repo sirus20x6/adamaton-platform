@@ -10,7 +10,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"go.temporal.io/sdk/temporal"
 
-	"github.com/sirus20x6/adamomaton-platform/dispatch/workflows"
+	"github.com/sirus20x6/adamaton-platform/dispatch/workflows"
 )
 
 // RecordActivities is the activity struct that owns durable writes to

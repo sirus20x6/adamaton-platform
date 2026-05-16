@@ -31,9 +31,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	pluginv1 "github.com/sirus20x6/adamomaton-platform/plugin-host/gen/go/dr/plugin/v1"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/manifest"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/secrets"
+	pluginv1 "github.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/manifest"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/secrets"
 )
 
 // PluginCtxKey is the context-value key the per-plugin gRPC interceptor

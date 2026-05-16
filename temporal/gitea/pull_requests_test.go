@@ -20,7 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sirus20x6/adamomaton-core/types"
+	"github.com/sirus20x6/adamaton-core/types"
 )
 
 // counterValueForLabels reads the unknown-409 counter at a specific

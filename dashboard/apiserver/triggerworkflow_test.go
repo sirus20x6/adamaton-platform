@@ -40,10 +40,10 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 
-	"github.com/sirus20x6/adamomaton-platform/temporal/gitea"
-	"github.com/sirus20x6/adamomaton-core/pgutil"
-	"github.com/sirus20x6/adamomaton-core/types"
-	"github.com/sirus20x6/adamomaton-evolve/workflow-builder/workflowstore"
+	"github.com/sirus20x6/adamaton-platform/temporal/gitea"
+	"github.com/sirus20x6/adamaton-core/pgutil"
+	"github.com/sirus20x6/adamaton-core/types"
+	"github.com/sirus20x6/adamaton-evolve/workflow-builder/workflowstore"
 )
 
 // newTriggerTestStore returns a fresh paradedb-backed workflow store

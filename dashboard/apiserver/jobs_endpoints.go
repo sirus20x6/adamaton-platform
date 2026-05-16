@@ -24,7 +24,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/jackc/pgx/v5"
-	dispatchworkflows "github.com/sirus20x6/adamomaton-platform/dispatch/workflows"
+	dispatchworkflows "github.com/sirus20x6/adamaton-platform/dispatch/workflows"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
 )

@@ -1,4 +1,4 @@
-# adamomaton-platform
+# adamaton-platform
 
 Always-on backend tier. Four Go modules: the dashboard API aggregator, the plugin-host that loads 14 search-source plugins, the dispatch worker, and the Temporal worker stack (gitea webhook + workflow starters + health checks).
 
@@ -49,4 +49,4 @@ Schemas owned: `evo.plugin_config` (plugin enable/disable + per-plugin secrets r
 
 ## Where this fits
 
-The dashboard is the **API aggregator** — by design it imports `adamomaton-delegator/delegator` in-process and calls `adamomaton-knowledge/skills-rae` and `adamomaton-deepresearch/nano-research` over HTTP. The frontend talks only to dashboard. plugin-host is called by deepresearch (for search-stage queries) and by the dashboard (for the `/library` import flows). Depends on `adamomaton-core`. See `docs/ARCHITECTURE.md` in the umbrella.
+The dashboard is the **API aggregator** — by design it imports `adamaton-delegator/delegator` in-process and calls `adamaton-knowledge/skills-rae` and `adamaton-deepresearch/nano-research` over HTTP. The frontend talks only to dashboard. plugin-host is called by deepresearch (for search-stage queries) and by the dashboard (for the `/library` import flows). Depends on `adamaton-core`. See `docs/ARCHITECTURE.md` in the umbrella.

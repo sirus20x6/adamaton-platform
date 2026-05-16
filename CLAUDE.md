@@ -1,4 +1,4 @@
-# Agent instructions — adamomaton-platform
+# Agent instructions — adamaton-platform
 
 API aggregator + plugin host + temporal worker stack. Four Go modules; `dashboard/apiserver/` is the highest-conflict path in the umbrella.
 

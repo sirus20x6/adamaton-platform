@@ -35,8 +35,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirupsen/logrus"
 
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/secrets"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/stage"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/secrets"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/stage"
 )
 
 // Upload caps. zotero.sqlite for a heavy library can reach a few GB

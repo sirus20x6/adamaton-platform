@@ -30,9 +30,9 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sirus20x6/adamomaton-core/pgutil"
-	"github.com/sirus20x6/adamomaton-core/types"
-	"github.com/sirus20x6/adamomaton-evolve/workflow-builder/workflowstore"
+	"github.com/sirus20x6/adamaton-core/pgutil"
+	"github.com/sirus20x6/adamaton-core/types"
+	"github.com/sirus20x6/adamaton-evolve/workflow-builder/workflowstore"
 )
 
 // newTestServerWithStore returns an APIServer wired to a fresh Postgres

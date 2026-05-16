@@ -12,8 +12,8 @@ import (
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 
-	dispatchactivities "github.com/sirus20x6/adamomaton-platform/dispatch/activities"
-	dispatchworkflows "github.com/sirus20x6/adamomaton-platform/dispatch/workflows"
+	dispatchactivities "github.com/sirus20x6/adamaton-platform/dispatch/activities"
+	dispatchworkflows "github.com/sirus20x6/adamaton-platform/dispatch/workflows"
 )
 
 // registerDispatchWorkflows wires DispatchWorkflow + BatchCoordinator

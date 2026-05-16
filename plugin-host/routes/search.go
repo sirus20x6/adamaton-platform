@@ -18,9 +18,9 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 
-	pluginv1 "github.com/sirus20x6/adamomaton-platform/plugin-host/gen/go/dr/plugin/v1"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/manifest"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/supervisor"
+	pluginv1 "github.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/manifest"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/supervisor"
 )
 
 func RegisterSearch(r *mux.Router, sup *supervisor.Supervisor, manifests map[string]*manifest.Manifest, logger *logrus.Logger) {

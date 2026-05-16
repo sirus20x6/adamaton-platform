@@ -21,8 +21,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sirus20x6/adamomaton-platform/temporal/activities"
-	"github.com/sirus20x6/adamomaton-platform/temporal/gitea"
+	"github.com/sirus20x6/adamaton-platform/temporal/activities"
+	"github.com/sirus20x6/adamaton-platform/temporal/gitea"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
