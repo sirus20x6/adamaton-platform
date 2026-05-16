@@ -1,0 +1,16 @@
+[Unit]
+Description=CCSAVER → Pi quota snapshot mirror
+Documentation=https://github.com/sirus20x6/evo/tree/main/dashboard/ccsaver-mirror
+# We don't strictly depend on ccsaver, but if it's running we want this
+# unit ordered after it so the DB schema is settled at boot.
+After=ccsaver.service
+
+[Service]
+Type=oneshot
+ExecStart=/thearray/git/evo/dashboard/ccsaver-mirror/mirror.sh
+Nice=10
+# Don't let one slow rsync stack up behind itself.
+TimeoutStartSec=45
+
+[Install]
+WantedBy=default.target

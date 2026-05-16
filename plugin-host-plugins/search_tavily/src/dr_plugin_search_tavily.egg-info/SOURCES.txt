@@ -1,0 +1,11 @@
+pyproject.toml
+src/dr_plugin_search_tavily/__init__.py
+src/dr_plugin_search_tavily/__main__.py
+src/dr_plugin_search_tavily/adapter.py
+src/dr_plugin_search_tavily/plugin.py
+src/dr_plugin_search_tavily.egg-info/PKG-INFO
+src/dr_plugin_search_tavily.egg-info/SOURCES.txt
+src/dr_plugin_search_tavily.egg-info/dependency_links.txt
+src/dr_plugin_search_tavily.egg-info/requires.txt
+src/dr_plugin_search_tavily.egg-info/top_level.txt
+tests/test_query.py

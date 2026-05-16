@@ -1,0 +1,173 @@
+// Shared message types used by both Plugin and Host services.
+//
+// Versioning: the package is dr.plugin.v1. Breaking changes bump to v2
+// (a new directory) so v1 callers keep working until they migrate.
+//
+// Field-number budgets: we reserve room (1..15 cheap, 16+ two-byte) so
+// adding optional fields later is non-breaking. Never reuse a removed
+// field number.
+
+syntax = "proto3";
+
+package dr.plugin.v1;
+
+option go_package = "github.com/thearray/evo/plugin-host/gen/go/dr/plugin/v1;pluginv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// PluginItem is one document an importer emits. Mirrors the existing
+// platform.plugin_items row shape so the host can write it directly.
+// markdown_body is allowed to be empty when the plugin staged the body
+// to disk via Host.StagePath and only carries a path reference in
+// metadata.
+message PluginItem {
+  string plugin_id = 1;
+  string external_id = 2;        // unique within (plugin_id, external_id)
+  string external_url = 3;
+  string title = 4;
+  google.protobuf.Struct metadata = 5;
+  string markdown_body = 6;
+  repeated string attachments = 7;  // host-staged paths
+}
+
+// RunSummary is what the plugin reports at the end of a Sync stream.
+// All counters are best-effort -- the host has its own per-item counters
+// from the stream and will reconcile.
+message RunSummary {
+  int64 seen = 1;
+  int64 new_items = 2;
+  int64 fetched = 3;
+  int64 deduped = 4;
+  int64 queued = 5;
+  int64 errored = 6;
+  int64 skipped = 7;
+}
+
+// Collection is a logical bucket an importer exposes (Zotero collections,
+// YouTube channels, etc.). Returned by Plugin.ListCollections.
+message Collection {
+  string id = 1;
+  string name = 2;
+  int64 item_count = 3;
+  google.protobuf.Struct metadata = 4;
+}
+
+// SearchResult is one hit from a search-category plugin's SearchQuery.
+// Maps 1:1 to the old app/adapters/protocol.py SearchResult dataclass.
+message SearchResult {
+  string adapter = 1;                            // plugin id, redundant but explicit
+  string external_id = 2;
+  string title = 3;
+  string url = 4;
+  string abstract = 5;
+  repeated string authors = 6;
+  google.protobuf.Timestamp published_at = 7;
+  string venue = 8;
+  int64 citation_count = 9;
+  google.protobuf.Struct raw = 10;               // adapter-specific extras
+  double score = 11;
+  SourceKind source_kind = 12;
+}
+
+// SearchPage is a page of hits + cursor. next_cursor is empty when there
+// are no more pages.
+message SearchPage {
+  repeated SearchResult results = 1;
+  string next_cursor = 2;
+  int64 total_estimated = 3;
+}
+
+// SourceKind is the coarse classification the legacy SearchAdapter
+// protocol used. Open enum: UNSPECIFIED is fallback.
+enum SourceKind {
+  SOURCE_KIND_UNSPECIFIED = 0;
+  SOURCE_KIND_JOURNAL = 1;
+  SOURCE_KIND_PREPRINT = 2;
+  SOURCE_KIND_REPO = 3;
+  SOURCE_KIND_FORUM = 4;
+  SOURCE_KIND_WIKI = 5;
+  SOURCE_KIND_WEB = 6;
+}
+
+// FetchedDoc is the body returned by SearchFetch when an adapter
+// supports lazy full-text fetching. body is bytes so binary formats
+// (pdf) round-trip cleanly; content_type tells the host what it is.
+message FetchedDoc {
+  string adapter = 1;
+  string external_id = 2;
+  string url = 3;
+  string title = 4;
+  string content_type = 5;       // e.g. application/pdf, text/markdown
+  bytes body = 6;
+  string source_tier = 7;        // legacy: ar5iv / vanity / latex / pdf
+  google.protobuf.Struct metadata = 8;
+}
+
+// SyncEvent is the streamed unit the plugin emits during Sync. Exactly
+// one of {item, progress, error, summary} is set per event. The host
+// short-circuits on the first error or summary.
+message SyncEvent {
+  oneof event {
+    PluginItem item = 1;
+    SyncProgress progress = 2;
+    SyncError error = 3;
+    RunSummary summary = 4;
+  }
+}
+
+message SyncProgress {
+  // Human-readable, optional. Used for plugin run UI's status line.
+  string message = 1;
+  // Plugin's own tally so far in this sync. Optional; host has its own.
+  int64 seen = 2;
+}
+
+message SyncError {
+  // Plugin-defined code -- "rate_limited", "auth_expired", etc.
+  string code = 1;
+  string message = 2;
+  bool fatal = 3;                // if true the host stops the run
+}
+
+// MarketplaceProduct is the scaffolded shape for marketplace.* plugins.
+// No implementations this round; defined so the wire is stable when
+// amazon / ebay / etc. land later.
+message MarketplaceProduct {
+  string plugin_id = 1;
+  string external_id = 2;        // SKU / ASIN / etc.
+  string url = 3;
+  string title = 4;
+  Money price = 5;
+  Money price_was = 6;           // optional sale price
+  string seller = 7;
+  string image_url = 8;
+  google.protobuf.Struct attributes = 9;     // size, color, etc.
+  AvailabilityState availability = 10;
+}
+
+message Money {
+  int64 minor_units = 1;         // cents, fils, etc.
+  string currency_code = 2;      // ISO-4217
+}
+
+enum AvailabilityState {
+  AVAILABILITY_UNSPECIFIED = 0;
+  AVAILABILITY_IN_STOCK = 1;
+  AVAILABILITY_LIMITED = 2;
+  AVAILABILITY_OUT_OF_STOCK = 3;
+  AVAILABILITY_PREORDER = 4;
+}
+
+message MarketplacePage {
+  repeated MarketplaceProduct products = 1;
+  string next_cursor = 2;
+  int64 total_estimated = 3;
+}
+
+message MarketplaceListing {
+  MarketplaceProduct product = 1;
+  string description = 2;
+  repeated string image_urls = 3;
+  google.protobuf.Struct details = 4;
+}

@@ -1,0 +1,11 @@
+pyproject.toml
+src/dr_plugin_search_jina/__init__.py
+src/dr_plugin_search_jina/__main__.py
+src/dr_plugin_search_jina/adapter.py
+src/dr_plugin_search_jina/plugin.py
+src/dr_plugin_search_jina.egg-info/PKG-INFO
+src/dr_plugin_search_jina.egg-info/SOURCES.txt
+src/dr_plugin_search_jina.egg-info/dependency_links.txt
+src/dr_plugin_search_jina.egg-info/requires.txt
+src/dr_plugin_search_jina.egg-info/top_level.txt
+tests/test_query.py

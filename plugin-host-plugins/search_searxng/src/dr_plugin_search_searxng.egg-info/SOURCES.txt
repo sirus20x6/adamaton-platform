@@ -1,0 +1,11 @@
+pyproject.toml
+src/dr_plugin_search_searxng/__init__.py
+src/dr_plugin_search_searxng/__main__.py
+src/dr_plugin_search_searxng/adapter.py
+src/dr_plugin_search_searxng/plugin.py
+src/dr_plugin_search_searxng.egg-info/PKG-INFO
+src/dr_plugin_search_searxng.egg-info/SOURCES.txt
+src/dr_plugin_search_searxng.egg-info/dependency_links.txt
+src/dr_plugin_search_searxng.egg-info/requires.txt
+src/dr_plugin_search_searxng.egg-info/top_level.txt
+tests/test_query.py

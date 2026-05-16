@@ -1,0 +1,180 @@
+// Host service: methods plugins call on the host (on a separate Unix
+// socket the host serves at DR_HOST_SOCK).
+//
+// Plugins are sandboxed from the DB and shared filesystem by default --
+// any DB row insert, dedup probe, file path the plugin needs has to
+// flow through one of these RPCs. That keeps the wire surface narrow
+// and lets the host enforce per-plugin permissions later.
+
+syntax = "proto3";
+
+package dr.plugin.v1;
+
+option go_package = "github.com/thearray/evo/plugin-host/gen/go/dr/plugin/v1;pluginv1";
+
+import "google/protobuf/struct.proto";
+
+service Host {
+  // ------- Dedup ------------------------------------------------------
+
+  // IsKnown asks whether (plugin_id, external_id) has already been
+  // ingested in any prior run. Cheap; index-only.
+  rpc IsKnown(IsKnownRequest) returns (IsKnownResponse);
+
+  // ------- Importer persistence --------------------------------------
+
+  // UpsertImportRow lets specialised importers (zotero) write into
+  // their dedicated table. Generic importers don't need this -- the
+  // host writes platform.plugin_items automatically from SyncEvent
+  // items emitted during Sync.
+  rpc UpsertImportRow(UpsertImportRowRequest) returns (UpsertImportRowResponse);
+
+  // ------- File staging ----------------------------------------------
+
+  // StagePath returns a writable path in the shared dr_uploads volume
+  // the plugin may write to (host creates the directory, sets perms).
+  // Use when the plugin shares the volume with the host (the common
+  // production case) -- avoids round-tripping bytes through gRPC.
+  rpc StagePath(StagePathRequest) returns (StagePathResponse);
+
+  // WriteAttachment is the fallback path for plugins that don't share
+  // the volume (or for very small blobs). Bytes flow over the wire;
+  // the host writes them to dr_uploads and returns the path it used.
+  rpc WriteAttachment(WriteAttachmentRequest) returns (WriteAttachmentResponse);
+
+  // ------- Config / secrets ------------------------------------------
+
+  // GetConfig returns the plugin's current decrypted config blob.
+  // Equivalent to what Hello.config carried at startup; useful when
+  // the plugin wants to re-read after a SetConfig.
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+
+  // SetConfig persists a new config blob (encrypted at rest). Used
+  // when the plugin runs an interactive auth flow (e.g. OAuth) and
+  // needs to save the resulting token.
+  rpc SetConfig(SetConfigRequest) returns (SetConfigResponse);
+
+  // ------- Observability ---------------------------------------------
+
+  // EmitMetric pushes a single counter/gauge/histogram observation to
+  // the host's prometheus registry, tagged with the plugin id.
+  rpc EmitMetric(EmitMetricRequest) returns (EmitMetricResponse);
+
+  // EmitLog forwards a log line to the host's structured logger so
+  // plugin output ends up in the same stream as host output. Plugins
+  // may also write to stderr; that's captured separately.
+  rpc EmitLog(EmitLogRequest) returns (EmitLogResponse);
+}
+
+// ----- Dedup ----------------------------------------------------------
+
+message IsKnownRequest {
+  string plugin_id = 1;
+  string external_id = 2;
+}
+
+message IsKnownResponse {
+  bool known = 1;
+  // If known, the document_id (if any) that the prior import resolved
+  // to. Lets the plugin link new mentions to existing documents.
+  string document_id = 2;
+}
+
+// ----- Importer persistence -------------------------------------------
+
+// UpsertImportRow is generic enough for zotero, but the table parameter
+// guards against the plugin writing anywhere it likes. The host has an
+// allowlist of (plugin_id, table) tuples it permits.
+message UpsertImportRowRequest {
+  string run_id = 1;
+  string plugin_id = 2;
+  // Which logical table the plugin is writing into. Today only
+  // "zotero_imports" is supported; the host rejects others.
+  string table = 3;
+  // Column-name → value bag. The host's persistence layer maps these
+  // to typed columns and rejects unknown columns.
+  google.protobuf.Struct row = 4;
+}
+
+message UpsertImportRowResponse {
+  // Row id the host wrote (uuid).
+  string id = 1;
+}
+
+// ----- File staging ---------------------------------------------------
+
+message StagePathRequest {
+  string run_id = 1;
+  // Suggested filename. The host may rewrite it to be safe (strip
+  // path separators, dedupe collisions with a suffix).
+  string filename = 2;
+  // Optional content-type hint; the host uses it to pick a subdirectory.
+  string content_type = 3;
+}
+
+message StagePathResponse {
+  // Absolute path under /var/lib/dr-uploads/ the plugin may write to.
+  // The host creates parent dirs and chmods 0644 after the plugin
+  // closes the file (plugins should not rely on perms during write).
+  string path = 1;
+}
+
+message WriteAttachmentRequest {
+  string run_id = 1;
+  string filename = 2;
+  string content_type = 3;
+  bytes body = 4;
+}
+
+message WriteAttachmentResponse {
+  string path = 1;
+}
+
+// ----- Config ---------------------------------------------------------
+
+message GetConfigRequest {
+  // Plugins may only read their own config; the host enforces that
+  // from the gRPC peer identity (which plugin owns this connection).
+}
+
+message GetConfigResponse {
+  google.protobuf.Struct config = 1;
+}
+
+message SetConfigRequest {
+  google.protobuf.Struct config = 1;
+}
+
+message SetConfigResponse {}
+
+// ----- Observability --------------------------------------------------
+
+message EmitMetricRequest {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_COUNTER = 1;
+    KIND_GAUGE = 2;
+    KIND_HISTOGRAM = 3;
+  }
+  Kind kind = 1;
+  string name = 2;
+  double value = 3;
+  map<string, string> labels = 4;
+}
+
+message EmitMetricResponse {}
+
+message EmitLogRequest {
+  enum Level {
+    LEVEL_UNSPECIFIED = 0;
+    LEVEL_DEBUG = 1;
+    LEVEL_INFO = 2;
+    LEVEL_WARN = 3;
+    LEVEL_ERROR = 4;
+  }
+  Level level = 1;
+  string message = 2;
+  google.protobuf.Struct fields = 3;
+}
+
+message EmitLogResponse {}

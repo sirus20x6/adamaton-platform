@@ -1,0 +1,32 @@
+{
+  "id": "search_stackexchange",
+  "name": "Stack Exchange",
+  "description": "Stack Exchange (default: stackoverflow.com) search; fetch() concatenates the question with the top 3 voted answers as markdown.",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query", "search.fetch"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_stackexchange"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "STACKEXCHANGE_KEY": {
+        "type": "string",
+        "description": "Stack Exchange API key. Raises the daily request quota."
+      },
+      "STACKEXCHANGE_SITE": {
+        "type": "string",
+        "description": "Site slug to query (default: stackoverflow)."
+      }
+    },
+    "required": []
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

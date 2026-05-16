@@ -1,0 +1,154 @@
+// Plugin service: methods the host calls on a plugin process. Every
+// plugin advertises a subset via its manifest capabilities array; the
+// host refuses to invoke methods the manifest didn't claim.
+
+syntax = "proto3";
+
+package dr.plugin.v1;
+
+option go_package = "github.com/thearray/evo/plugin-host/gen/go/dr/plugin/v1;pluginv1";
+
+import "dr/plugin/v1/types.proto";
+import "google/protobuf/struct.proto";
+
+service Plugin {
+  // ------- Lifecycle (all plugins implement these three) -------------
+
+  // Hello is the first call. The host sends its version + a copy of
+  // the plugin's resolved config (decrypted, expanded); the plugin
+  // returns its build info and the capability list it actually
+  // implements (must be a subset of what the manifest declared).
+  rpc Hello(HelloRequest) returns (HelloResponse);
+
+  // Ping is the liveness probe. Plugins return immediately.
+  rpc Ping(PingRequest) returns (PingResponse);
+
+  // Shutdown asks the plugin to flush + exit cleanly. The host SIGKILLs
+  // after a grace period if the plugin doesn't exit on its own.
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+
+  // ------- Importer category -----------------------------------------
+
+  rpc ListCollections(ListCollectionsRequest) returns (ListCollectionsResponse);
+
+  // Sync is server-streaming. Plugin emits SyncEvent messages (items,
+  // progress, errors). The final event MUST be a `summary`. The plugin
+  // may call back into the host (IsKnown, StagePath, …) on the host
+  // socket *while* this stream is open -- those are unary RPCs, not
+  // multiplexed onto the sync stream.
+  rpc Sync(SyncRequest) returns (stream SyncEvent);
+
+  // ------- Search category -------------------------------------------
+
+  rpc SearchQuery(SearchQueryRequest) returns (SearchQueryResponse);
+  rpc SearchFetch(SearchFetchRequest) returns (SearchFetchResponse);
+
+  // ------- Marketplace category (scaffolded) -------------------------
+
+  rpc MarketplaceQuery(MarketplaceQueryRequest) returns (MarketplaceQueryResponse);
+  rpc MarketplaceFetchListing(MarketplaceFetchListingRequest) returns (MarketplaceFetchListingResponse);
+}
+
+// ----- Lifecycle messages ---------------------------------------------
+
+message HelloRequest {
+  // Semver of the host implementation. Plugins may refuse a host that's
+  // too old.
+  string host_version = 1;
+  // Decrypted config blob the host loaded from platform.plugin_config.
+  // Shape matches the plugin's manifest.config_schema.
+  google.protobuf.Struct config = 2;
+  // Path of the plugin's working dir inside the shared dr_uploads
+  // volume. Plugin may write there freely.
+  string work_dir = 3;
+}
+
+message HelloResponse {
+  string plugin_version = 1;
+  // Capabilities the plugin actually implements. Must be a subset of
+  // what the manifest declares; the host rejects extras.
+  repeated string capabilities = 2;
+}
+
+message PingRequest {}
+message PingResponse {}
+
+message ShutdownRequest {
+  // Grace period the host will wait before SIGKILL.
+  int32 grace_seconds = 1;
+}
+message ShutdownResponse {}
+
+// ----- Importer messages ----------------------------------------------
+
+message ListCollectionsRequest {
+  // Optional plugin-specific filter (e.g. user_id for multi-account).
+  google.protobuf.Struct options = 1;
+}
+
+message ListCollectionsResponse {
+  repeated Collection collections = 1;
+}
+
+message SyncRequest {
+  // Host-generated run id (uuid) used in platform.plugin_runs. Plugins
+  // pass it back when calling Host.UpsertImportRow / WriteAttachment so
+  // the host can attribute rows.
+  string run_id = 1;
+  // Optional collection scope.
+  string collection_id = 2;
+  // Optional cursor for incremental sync (e.g. Zotero's `since` version).
+  string since = 3;
+  // Optional corpus the importer should attach items to. Host wraps it
+  // through to ingest tasks.
+  string corpus_id = 4;
+  // Plugin-specific args (manifest.args_schema).
+  google.protobuf.Struct options = 5;
+}
+
+// ----- Search messages ------------------------------------------------
+
+message SearchQueryRequest {
+  string query = 1;
+  int32 limit = 2;        // default 10, max 100
+  string cursor = 3;      // adapter-specific pagination
+  // If set, only return results published at-or-after this RFC3339 ts.
+  string since = 4;
+}
+
+message SearchQueryResponse {
+  SearchPage page = 1;
+}
+
+message SearchFetchRequest {
+  // The full SearchResult the host wants the body for. Adapters that
+  // don't support fetch return UNIMPLEMENTED.
+  SearchResult result = 1;
+}
+
+message SearchFetchResponse {
+  FetchedDoc doc = 1;
+}
+
+// ----- Marketplace messages (scaffolded) ------------------------------
+
+message MarketplaceQueryRequest {
+  string query = 1;
+  int32 limit = 2;
+  string cursor = 3;
+  // Open-ended filter bag (price_min, price_max, brand, …).
+  google.protobuf.Struct filters = 4;
+}
+
+message MarketplaceQueryResponse {
+  MarketplacePage page = 1;
+}
+
+message MarketplaceFetchListingRequest {
+  string external_id = 1;
+  string url = 2;
+}
+
+message MarketplaceFetchListingResponse {
+  MarketplaceListing listing = 1;
+}

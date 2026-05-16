@@ -1,0 +1,6 @@
+grpcio>=1.65
+protobuf<8,>=5
+
+[test]
+pytest>=8
+pytest-asyncio>=0.23

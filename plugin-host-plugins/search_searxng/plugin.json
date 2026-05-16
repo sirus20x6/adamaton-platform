@@ -1,0 +1,32 @@
+{
+  "id": "search_searxng",
+  "name": "SearXNG",
+  "description": "Adapter over a self-hosted SearXNG JSON endpoint with HTML-to-markdown fetch.",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query", "search.fetch"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_searxng"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "SEARXNG_BASE_URL": {
+        "type": "string",
+        "description": "Base URL of the SearXNG instance (e.g. http://searxng:8080)."
+      },
+      "SEARXNG_URL": {
+        "type": "string",
+        "description": "Legacy alias for SEARXNG_BASE_URL; honored for backwards compatibility."
+      }
+    },
+    "required": ["SEARXNG_BASE_URL"]
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

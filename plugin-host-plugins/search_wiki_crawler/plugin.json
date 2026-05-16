@@ -1,0 +1,34 @@
+{
+  "id": "search_wiki_crawler",
+  "name": "Wiki Crawler",
+  "description": "BFS HTML crawlers for Lexicanum (Warhammer 40k), TVTropes Warhammer40000, and Warhammer Fantasy Fandom. search.query expands from a seed slug; search.fetch returns the page's markdown body.",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query", "search.fetch"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_wiki_crawler"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "user_agent": {
+        "type": "string",
+        "description": "HTTP User-Agent header. Falls back to a deepresearch-platform default."
+      },
+      "max_pages_per_query": {
+        "type": "integer",
+        "description": "Hard cap on pages visited per search.query call. Default 25.",
+        "minimum": 1,
+        "maximum": 500
+      }
+    },
+    "required": []
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}
