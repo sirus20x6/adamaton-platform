@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	skillsworkflows "github.com/sirus20x6/adamomaton-knowledge/skills/workflows"
+	skillsworkflows "github.com/sirus20x6/adamaton-knowledge/skills/workflows"
 	"go.temporal.io/api/serviceerror"
 )
 

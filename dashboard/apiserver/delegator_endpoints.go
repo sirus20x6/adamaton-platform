@@ -14,8 +14,8 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/sirus20x6/adamomaton-delegator/delegator"
-	"github.com/sirus20x6/adamomaton-delegator/delegator/quota"
+	"github.com/sirus20x6/adamaton-delegator/delegator"
+	"github.com/sirus20x6/adamaton-delegator/delegator/quota"
 )
 
 // setupDelegatorRoutes registers /api/delegator/quota + /api/delegator/tasks

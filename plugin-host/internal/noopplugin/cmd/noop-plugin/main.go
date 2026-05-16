@@ -17,7 +17,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	pluginv1 "github.com/sirus20x6/adamomaton-platform/plugin-host/gen/go/dr/plugin/v1"
+	pluginv1 "github.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1"
 )
 
 type server struct {

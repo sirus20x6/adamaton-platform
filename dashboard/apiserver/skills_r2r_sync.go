@@ -12,7 +12,7 @@ import (
 	"os"
 	"time"
 
-	skillsworkflows "github.com/sirus20x6/adamomaton-knowledge/skills/workflows"
+	skillsworkflows "github.com/sirus20x6/adamaton-knowledge/skills/workflows"
 	enums "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 )

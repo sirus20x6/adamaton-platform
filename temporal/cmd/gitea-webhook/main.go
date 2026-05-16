@@ -24,11 +24,11 @@ import (
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
 
-	"github.com/sirus20x6/adamomaton-core/config"
-	"github.com/sirus20x6/adamomaton-platform/temporal/gitea"
-	"github.com/sirus20x6/adamomaton-core/metrics"
-	"github.com/sirus20x6/adamomaton-core/types"
-	"github.com/sirus20x6/adamomaton-platform/temporal/workflows"
+	"github.com/sirus20x6/adamaton-core/config"
+	"github.com/sirus20x6/adamaton-platform/temporal/gitea"
+	"github.com/sirus20x6/adamaton-core/metrics"
+	"github.com/sirus20x6/adamaton-core/types"
+	"github.com/sirus20x6/adamaton-platform/temporal/workflows"
 )
 
 // defaultMaxInflightWebhooks bounds the number of webhook deliveries we

@@ -39,16 +39,16 @@ import (
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 
-	pluginv1 "github.com/sirus20x6/adamomaton-platform/plugin-host/gen/go/dr/plugin/v1"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/hostserver"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/manifest"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/persist"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/runner"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/secrets"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/stage"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/supervisor"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/routes"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/store"
+	pluginv1 "github.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/hostserver"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/manifest"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/persist"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/runner"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/secrets"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/stage"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/supervisor"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/routes"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/store"
 )
 
 func main() {

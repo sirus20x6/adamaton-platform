@@ -9,7 +9,7 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/manifest"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/manifest"
 )
 
 func RegisterImporters(r *mux.Router, manifests map[string]*manifest.Manifest) {

@@ -19,11 +19,11 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	pluginv1 "github.com/sirus20x6/adamomaton-platform/plugin-host/gen/go/dr/plugin/v1"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/persist"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/secrets"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/stage"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/supervisor"
+	pluginv1 "github.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/persist"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/secrets"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/stage"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/supervisor"
 )
 
 // dbConn is the slice of pgxpool.Pool we actually use. Carved out as an

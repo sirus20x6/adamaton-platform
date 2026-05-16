@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sirus20x6/adamomaton-core/envutil"
+	"github.com/sirus20x6/adamaton-core/envutil"
 	"go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 )

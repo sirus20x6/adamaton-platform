@@ -9,7 +9,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
-	"github.com/sirus20x6/adamomaton-platform/temporal/activities"
+	"github.com/sirus20x6/adamaton-platform/temporal/activities"
 )
 
 // TestDelegationWorkflow_Success verifies the workflow returns the

@@ -34,8 +34,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirupsen/logrus"
 
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/manifest"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/secrets"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/manifest"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/secrets"
 )
 
 // RegisterPlugins wires the plugins surface. See package doc for the

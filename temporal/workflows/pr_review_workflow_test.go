@@ -12,8 +12,8 @@ import (
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
 
-	"github.com/sirus20x6/adamomaton-platform/temporal/activities"
-	"github.com/sirus20x6/adamomaton-platform/temporal/gitea"
+	"github.com/sirus20x6/adamaton-platform/temporal/activities"
+	"github.com/sirus20x6/adamaton-platform/temporal/gitea"
 )
 
 func TestMakeEnhancedDecision(t *testing.T) {

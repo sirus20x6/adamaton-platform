@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/sirus20x6/adamomaton-core/types"
+	"github.com/sirus20x6/adamaton-core/types"
 )
 
 // CreateComment adds a comment to a pull request. State-mutating endpoint —

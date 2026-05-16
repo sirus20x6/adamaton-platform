@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/manifest"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/manifest"
 )
 
 // writeJSON sets the Content-Type, writes the status, encodes the body.

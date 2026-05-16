@@ -25,7 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/jackc/pgx/v5"
-	skillsworkflows "github.com/sirus20x6/adamomaton-knowledge/skills/workflows"
+	skillsworkflows "github.com/sirus20x6/adamaton-knowledge/skills/workflows"
 	enums "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 )

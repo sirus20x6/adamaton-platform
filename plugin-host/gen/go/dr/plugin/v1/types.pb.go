@@ -1364,7 +1364,7 @@ const file_dr_plugin_v1_types_proto_rawDesc = "" +
 	"\x15AVAILABILITY_IN_STOCK\x10\x01\x12\x18\n" +
 	"\x14AVAILABILITY_LIMITED\x10\x02\x12\x1d\n" +
 	"\x19AVAILABILITY_OUT_OF_STOCK\x10\x03\x12\x19\n" +
-	"\x15AVAILABILITY_PREORDER\x10\x04BBZ@github.com/sirus20x6/adamomaton-platform/plugin-host/gen/go/dr/plugin/v1;pluginv1b\x06proto3"
+	"\x15AVAILABILITY_PREORDER\x10\x04BBZ@github.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1;pluginv1b\x06proto3"
 
 var (
 	file_dr_plugin_v1_types_proto_rawDescOnce sync.Once

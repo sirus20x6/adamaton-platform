@@ -20,7 +20,7 @@ import (
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sirus20x6/adamomaton-core/types"
+	"github.com/sirus20x6/adamaton-core/types"
 )
 
 // newTestClient returns a GiteaClient pointed at the given test server URL

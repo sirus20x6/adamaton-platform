@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"github.com/sirus20x6/adamomaton-core/types"
+	"github.com/sirus20x6/adamaton-core/types"
 )
 
 // sanitizePathSegment escapes a user-supplied path segment to prevent path traversal

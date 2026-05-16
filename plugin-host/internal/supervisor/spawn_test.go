@@ -15,8 +15,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	pluginv1 "github.com/sirus20x6/adamomaton-platform/plugin-host/gen/go/dr/plugin/v1"
-	"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/manifest"
+	pluginv1 "github.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/manifest"
 )
 
 // stubHost is a do-nothing HostServer that lets the supervisor wire the
@@ -32,7 +32,7 @@ func buildNoop(t *testing.T) string {
 	tmp := t.TempDir()
 	bin := filepath.Join(tmp, "noop-plugin")
 	cmd := exec.Command("go", "build", "-o", bin,
-		"github.com/sirus20x6/adamomaton-platform/plugin-host/internal/noopplugin/cmd/noop-plugin")
+		"github.com/sirus20x6/adamaton-platform/plugin-host/internal/noopplugin/cmd/noop-plugin")
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("build noop-plugin: %v", err)

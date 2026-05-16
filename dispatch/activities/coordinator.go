@@ -8,7 +8,7 @@ import (
 	enums "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 
-	"github.com/sirus20x6/adamomaton-platform/dispatch/workflows"
+	"github.com/sirus20x6/adamaton-platform/dispatch/workflows"
 )
 
 // CoordinatorActivities wraps the Temporal client so the DispatchWorkflow

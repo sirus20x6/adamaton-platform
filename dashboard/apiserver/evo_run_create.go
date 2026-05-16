@@ -18,7 +18,7 @@ import (
 	"github.com/gorilla/mux"
 	"go.temporal.io/sdk/client"
 
-	dispatchworkflows "github.com/sirus20x6/adamomaton-platform/dispatch/workflows"
+	dispatchworkflows "github.com/sirus20x6/adamaton-platform/dispatch/workflows"
 )
 
 // vramFloor returns the MinVRAMGB requirement for an evolution run.

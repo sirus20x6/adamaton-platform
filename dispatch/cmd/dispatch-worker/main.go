@@ -23,8 +23,8 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
-	"github.com/sirus20x6/adamomaton-core/workerregistry"
-	dispatchworkflows "github.com/sirus20x6/adamomaton-platform/dispatch/workflows"
+	"github.com/sirus20x6/adamaton-core/workerregistry"
+	dispatchworkflows "github.com/sirus20x6/adamaton-platform/dispatch/workflows"
 )
 
 const (

@@ -41,11 +41,11 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 
-	"github.com/sirus20x6/adamomaton-core/config"
-	"github.com/sirus20x6/adamomaton-core/envutil"
-	"github.com/sirus20x6/adamomaton-platform/temporal/gitea"
-	"github.com/sirus20x6/adamomaton-core/metrics"
-	"github.com/sirus20x6/adamomaton-core/types"
+	"github.com/sirus20x6/adamaton-core/config"
+	"github.com/sirus20x6/adamaton-core/envutil"
+	"github.com/sirus20x6/adamaton-platform/temporal/gitea"
+	"github.com/sirus20x6/adamaton-core/metrics"
+	"github.com/sirus20x6/adamaton-core/types"
 )
 
 // defaultVLLMMaxConcurrent caps the number of concurrent connections to the

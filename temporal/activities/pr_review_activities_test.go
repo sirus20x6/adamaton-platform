@@ -14,8 +14,8 @@ import (
 
 	"go.temporal.io/sdk/temporal"
 
-	"github.com/sirus20x6/adamomaton-platform/temporal/gitea"
-	"github.com/sirus20x6/adamomaton-core/types"
+	"github.com/sirus20x6/adamaton-platform/temporal/gitea"
+	"github.com/sirus20x6/adamaton-core/types"
 )
 
 // mustMarshalJSON marshals v or fails the test. Wrapped here so each

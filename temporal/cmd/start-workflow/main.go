@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sirus20x6/adamomaton-core/metrics"
-	"github.com/sirus20x6/adamomaton-platform/temporal/workflows"
+	"github.com/sirus20x6/adamaton-core/metrics"
+	"github.com/sirus20x6/adamaton-platform/temporal/workflows"
 	"go.temporal.io/sdk/client"
 )
 

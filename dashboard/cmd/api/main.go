@@ -14,9 +14,9 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/sirus20x6/adamomaton-platform/dashboard/apiserver"
-	"github.com/sirus20x6/adamomaton-core/config"
-	"github.com/sirus20x6/adamomaton-core/envutil"
+	"github.com/sirus20x6/adamaton-platform/dashboard/apiserver"
+	"github.com/sirus20x6/adamaton-core/config"
+	"github.com/sirus20x6/adamaton-core/envutil"
 )
 
 func main() {
