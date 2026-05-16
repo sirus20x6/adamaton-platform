@@ -219,6 +219,7 @@ func (s *server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	log.Printf("restart: service=%s tag=%s", svc, tag)
 	tagsPath := filepath.Join(s.composeDir, "image-tags.env")
 	if err := upsertTag(tagsPath, svc, tag); err != nil {
 		http.Error(w, "write image-tags.env: "+err.Error(), http.StatusInternalServerError)
@@ -229,6 +230,7 @@ func (s *server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	pullOut, err := s.compose(ctx, "pull", svc)
 	if err != nil {
+		log.Printf("restart: pull failed svc=%s tag=%s err=%v", svc, tag, err)
 		writeJSON(w, http.StatusBadGateway, map[string]any{"step": "pull", "error": err.Error(), "output": string(pullOut)})
 		return
 	}
@@ -236,11 +238,20 @@ func (s *server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	// stack (postgres, temporal, etc.). Without this, any drift in their
 	// compose blocks since the last `compose up` triggers a full recreate
 	// cascade -- which is how a ship of evo-api once cycled postgres.
-	upOut, err := s.compose(ctx, "up", "-d", "--no-deps", svc)
+	//
+	// --force-recreate because `up -d` only recreates a container when the
+	// service block's config hash changes. Bumping a tag in image-tags.env
+	// updates the resolved image: ref but the config hash compose computes
+	// is based on the service block itself (which didn't change), so the
+	// old container stays running with the old image. --force-recreate
+	// makes the recreate unconditional once compose is invoked at all.
+	upOut, err := s.compose(ctx, "up", "-d", "--no-deps", "--force-recreate", svc)
 	if err != nil {
+		log.Printf("restart: up failed svc=%s tag=%s err=%v", svc, tag, err)
 		writeJSON(w, http.StatusBadGateway, map[string]any{"step": "up", "error": err.Error(), "output": string(upOut)})
 		return
 	}
+	log.Printf("restart: ok svc=%s tag=%s", svc, tag)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service": svc,
 		"tag":     tag,
@@ -280,7 +291,7 @@ func (s *server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 			results = append(results, map[string]any{"service": svc, "step": "pull", "error": err.Error(), "output": tail(string(pullOut), 20)})
 			continue
 		}
-		upOut, err := s.compose(ctx, "up", "-d", "--no-deps", svc)
+		upOut, err := s.compose(ctx, "up", "-d", "--no-deps", "--force-recreate", svc)
 		cancel()
 		if err != nil {
 			results = append(results, map[string]any{"service": svc, "step": "up", "error": err.Error(), "output": tail(string(upOut), 20)})
