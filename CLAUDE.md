@@ -1,5 +1,11 @@
 # Agent instructions — adamaton-platform
 
+> **🚫 BLOCKING — never commit to `main` directly.** Adamaton's pre-commit hook hard-rejects commits to `main`/`master` from the canonical checkout. Always start with:
+> ```bash
+> cd /thearray/git/Adamaton && bin/adam claim 'platform'/<task>
+> ```
+> This creates a worktree on a feature branch where you can work freely. If you accidentally edited main, run `bin/adam rescue` from the umbrella to recover. See [umbrella CLAUDE.md](../CLAUDE.md) for the full agent workflow.
+
 API aggregator + plugin host + temporal worker stack. Four Go modules; `dashboard/apiserver/` is the highest-conflict path in the umbrella.
 
 ## Before you edit
