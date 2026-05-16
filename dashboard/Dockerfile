@@ -1,20 +1,34 @@
-# Two-stage strategy: cross-compile the Go binary on the host, then
-# bake a tiny runtime image that just copies it in. This avoids
-# multi-arch buildx complexity — the host runs the Go cross-compile,
-# the image is single-arch (arm64 for the Pi) and tiny.
+# Multi-stage build for evo-api (dashboard binary served at :9123).
 #
-# Build with the wrapper script:
-#   ./dashboard/scripts/deploy-evo-api.sh
-# Or manually (run from the repo root):
-#   GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
-#     go build -trimpath -ldflags='-s -w' \
-#     -o dashboard/bin/api-arm64 ./dashboard/cmd/api
+# Build context MUST be the umbrella root, because dashboard/go.mod uses
+# replace directives like `../../core` that point at sibling sub-repos.
+# Those are unreachable with a per-sub-repo context.
+#
 #   docker buildx build --platform linux/arm64 \
-#     -t evo-api:dev --output type=docker \
-#     -f dashboard/Dockerfile dashboard/
+#     -f platform/dashboard/Dockerfile \
+#     -t 10.0.4.37:5000/adamaton-evo-api:<tag> --push .
+#
+# bin/adam ship pi5 evo-api handles this; ship_service_spec sets context=".".
+
+FROM golang:1.25-trixie AS build
+WORKDIR /src
+# Copy every sub-repo because dashboard/go.mod's replace directives
+# reach across to ../../core, ../../knowledge/*, ../../delegator/*,
+# ../../evolve/*.
+COPY core ./core
+COPY knowledge ./knowledge
+COPY deepresearch ./deepresearch
+COPY delegator ./delegator
+COPY evolve ./evolve
+COPY platform ./platform
+
+WORKDIR /src/platform/dashboard
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build -trimpath -ldflags='-s -w' \
+    -o /out/api ./cmd/api
 
 FROM alpine:3.21
 RUN apk --no-cache add ca-certificates tzdata
-COPY bin/api-arm64 /usr/local/bin/api
+COPY --from=build /out/api /usr/local/bin/api
 EXPOSE 9123
 ENTRYPOINT ["/usr/local/bin/api"]
