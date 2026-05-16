@@ -14,7 +14,11 @@ FROM golang:1.25-trixie AS build
 WORKDIR /src
 # Copy every sub-repo because dashboard/go.mod's replace directives
 # reach across to ../../core, ../../knowledge/*, ../../delegator/*,
-# ../../evolve/*.
+# ../../evolve/*. Also copy go.work so the build runs in workspace
+# mode; that's the only way Go reconciles dep versions across the
+# union of every sub-repo's go.mod (without it the dashboard's go.sum
+# is missing entries for deps pulled in transitively by other modules).
+COPY go.work go.work.sum* ./
 COPY core ./core
 COPY knowledge ./knowledge
 COPY deepresearch ./deepresearch
@@ -22,10 +26,10 @@ COPY delegator ./delegator
 COPY evolve ./evolve
 COPY platform ./platform
 
-WORKDIR /src/platform/dashboard
+WORKDIR /src
 RUN CGO_ENABLED=0 GOOS=linux \
     go build -trimpath -ldflags='-s -w' \
-    -o /out/api ./cmd/api
+    -o /out/api ./platform/dashboard/cmd/api
 
 FROM alpine:3.21
 RUN apk --no-cache add ca-certificates tzdata
