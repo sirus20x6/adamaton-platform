@@ -1,12 +1,26 @@
-# Mirror of skills/Dockerfile + reindex/Dockerfile: cross-compile on
-# host, bake a tiny Alpine runtime image. Statically linked (CGO=0).
+# dispatch-worker multi-stage Dockerfile.
 #
-# Build with `make pi-dispatch-worker` (cross-compiles to bin/) then:
-#   docker buildx build --platform linux/arm64 \
-#     -t evo-dispatch-worker:dev --output type=docker \
-#     -f dispatch/Dockerfile bin/
+# Build context MUST be the umbrella root (bin/adam ship sets it to "."),
+# because dispatch/go.mod uses replace directives like ../../core that
+# point at sibling sub-repos. --platform=$BUILDPLATFORM pins this stage
+# to the workstation's native arch (amd64); GOARCH=$TARGETARCH cross-
+# compiles to whatever the runtime image will be.
+FROM --platform=$BUILDPLATFORM golang:1.25-trixie AS build
+ARG TARGETARCH
+WORKDIR /src
+COPY go.work go.work.sum* ./
+COPY core ./core
+COPY knowledge ./knowledge
+COPY deepresearch ./deepresearch
+COPY delegator ./delegator
+COPY evolve ./evolve
+COPY platform ./platform
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags='-s -w' \
+    -o /out/dispatch-worker ./platform/dispatch/cmd/dispatch-worker
 
 FROM alpine:3.21
 RUN apk --no-cache add ca-certificates tzdata
-COPY dispatch-worker.arm64 /usr/local/bin/dispatch-worker
+COPY --from=build /out/dispatch-worker /usr/local/bin/dispatch-worker
 ENTRYPOINT ["/usr/local/bin/dispatch-worker"]
