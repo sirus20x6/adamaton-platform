@@ -1021,7 +1021,7 @@ const file_dr_plugin_v1_host_proto_rawDesc = "" +
 	"\tSetConfig\x12\x1e.dr.plugin.v1.SetConfigRequest\x1a\x1f.dr.plugin.v1.SetConfigResponse\x12O\n" +
 	"\n" +
 	"EmitMetric\x12\x1f.dr.plugin.v1.EmitMetricRequest\x1a .dr.plugin.v1.EmitMetricResponse\x12F\n" +
-	"\aEmitLog\x12\x1c.dr.plugin.v1.EmitLogRequest\x1a\x1d.dr.plugin.v1.EmitLogResponseBBZ@github.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1;pluginv1b\x06proto3"
+	"\aEmitLog\x12\x1c.dr.plugin.v1.EmitLogRequest\x1a\x1d.dr.plugin.v1.EmitLogResponseBQZOgithub.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1;pluginv1b\x06proto3"
 
 var (
 	file_dr_plugin_v1_host_proto_rawDescOnce sync.Once

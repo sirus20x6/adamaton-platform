@@ -944,7 +944,7 @@ const file_dr_plugin_v1_plugin_proto_rawDesc = "" +
 	"\vSearchQuery\x12 .dr.plugin.v1.SearchQueryRequest\x1a!.dr.plugin.v1.SearchQueryResponse\x12R\n" +
 	"\vSearchFetch\x12 .dr.plugin.v1.SearchFetchRequest\x1a!.dr.plugin.v1.SearchFetchResponse\x12a\n" +
 	"\x10MarketplaceQuery\x12%.dr.plugin.v1.MarketplaceQueryRequest\x1a&.dr.plugin.v1.MarketplaceQueryResponse\x12v\n" +
-	"\x17MarketplaceFetchListing\x12,.dr.plugin.v1.MarketplaceFetchListingRequest\x1a-.dr.plugin.v1.MarketplaceFetchListingResponseBBZ@github.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1;pluginv1b\x06proto3"
+	"\x17MarketplaceFetchListing\x12,.dr.plugin.v1.MarketplaceFetchListingRequest\x1a-.dr.plugin.v1.MarketplaceFetchListingResponseBQZOgithub.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1;pluginv1b\x06proto3"
 
 var (
 	file_dr_plugin_v1_plugin_proto_rawDescOnce sync.Once
