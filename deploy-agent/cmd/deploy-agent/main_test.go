@@ -55,6 +55,10 @@ func TestTagEnvKey(t *testing.T) {
 		"dashboard":            "ADAMATON_DASHBOARD_TAG",
 		"nano-research-worker": "ADAMATON_NANO_RESEARCH_WORKER_TAG",
 		"skills-rae-worker":    "ADAMATON_SKILLS_RAE_WORKER_TAG",
+		// adamaton- prefix is stripped so the unified worker service
+		// "adamaton-worker" maps to ADAMATON_WORKER_TAG, not the
+		// doubled-up ADAMATON_ADAMATON_WORKER_TAG.
+		"adamaton-worker": "ADAMATON_WORKER_TAG",
 	}
 	for svc, want := range cases {
 		if got := tagEnvKey(svc); got != want {
