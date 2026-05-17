@@ -645,7 +645,16 @@ func upsertTag(path, svc, tag string) error {
 // tagEnvKey converts a compose service name to its image-tags.env key:
 //
 //	nano-research-worker -> ADAMATON_NANO_RESEARCH_WORKER_TAG
+//	adamaton-worker      -> ADAMATON_WORKER_TAG     (prefix stripped)
+//
+// The leading "adamaton-" is stripped before uppercasing because every
+// key in image-tags.env already starts with "ADAMATON_" — without the
+// strip the unified worker service would map to
+// ADAMATON_ADAMATON_WORKER_TAG, which doesn't match anything. Every
+// legacy service name (skills-worker, dispatch-worker, …) lacks the
+// prefix and is unaffected.
 func tagEnvKey(svc string) string {
+	svc = strings.TrimPrefix(svc, "adamaton-")
 	upper := strings.ToUpper(svc)
 	upper = strings.ReplaceAll(upper, "-", "_")
 	return "ADAMATON_" + upper + "_TAG"
