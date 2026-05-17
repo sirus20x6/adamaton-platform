@@ -58,13 +58,15 @@ RUN set -eux; \
     tar -C / -Jxpf /tmp/s6-overlay-arch.tar.xz; \
     rm /tmp/s6-overlay-*.tar.xz
 ARG GO_TAGS="skills reindex dispatch"
-COPY platform/worker/s6/cont-init.d/ /etc/cont-init.d/
-COPY platform/worker/s6/s6-rc.d/     /etc/s6-overlay/s6-rc.d/
+COPY platform/worker/s6/s6-rc.d/   /etc/s6-overlay/s6-rc.d/
+COPY platform/worker/s6/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 # Bake the user-bundle contents.d entries at build time, one per queue
 # implied by the GO_TAGS. s6-rc compiles /etc/s6-overlay/s6-rc.d/ once
-# at /init time — BEFORE cont-init.d runs — so the user bundle has to
-# be fully populated by the image, not by a runtime script. The
-# cont-init script remains, but only as a sanity check + log line.
+# at /init time — too early for any runtime hook except the entrypoint
+# script below. WORKER_QUEUES filtering happens in /entrypoint.sh
+# BEFORE handing off to /init, by pruning contents.d/ entries the
+# operator excluded.
 RUN set -eux; \
     contents=/etc/s6-overlay/s6-rc.d/user/contents.d; \
     rm -f "$contents"/.gitkeep "$contents"/.keep; \
@@ -79,7 +81,7 @@ RUN set -eux; \
     done; \
     ls -1 "$contents"
 COPY --from=build /out/adamaton-worker /usr/local/bin/adamaton-worker
-ENTRYPOINT ["/init"]
+ENTRYPOINT ["/entrypoint.sh"]
 
 # --- runtime-light: skills + reindex + dispatch, no python ------------------
 FROM s6-base AS runtime-light
