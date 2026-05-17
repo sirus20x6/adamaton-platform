@@ -24,6 +24,7 @@ import (
 	"go.temporal.io/sdk/worker"
 
 	"github.com/sirus20x6/adamaton-core/workerregistry"
+	"github.com/sirus20x6/adamaton-platform/dispatch/workerentry"
 	dispatchworkflows "github.com/sirus20x6/adamaton-platform/dispatch/workflows"
 )
 
@@ -70,18 +71,17 @@ func main() {
 		MaxConcurrentWorkflowTaskExecutionSize: 16,
 	})
 
-	// PHASE2B-REGISTER-WORKFLOWS — agent B adds DispatchWorkflow and
-	// BatchCoordinator registrations here via registrations.go.
-	registerWorkflows(w)
+	// Workflow + activity registration lives in dispatch/workerentry
+	// so the umbrella's consolidated adamaton-worker can install the
+	// same set without duplicating the registration code.
+	workerentry.Register(w, workerentry.Deps{
+		Pool:     pool,
+		Temporal: c,
+		Logger:   logger,
+	})
 
-	// PHASE2B-REGISTER-ACTIVITIES — agent B constructs
-	// &SelectActivities{Pool}, &RecordActivities{Pool}, &ExecuteActivities{Client}
-	// and registers them.
-	registerActivities(w, pool, c, logger)
-
-	// PHASE2D — this worker registers itself into evo.workers too, so
-	// the registry shows the dispatcher's presence (useful for the
-	// Nodes page sanity check).
+	// Self-registration into evo.workers so the dispatcher shows up on
+	// the /nodes page.
 	if sess, err := registerSelf(ctx, pool, taskQueue, logger); err != nil {
 		logger.WithError(err).Warn("self-registration failed; dispatch-worker continues without a workers row")
 	} else if sess != nil {
@@ -93,14 +93,6 @@ func main() {
 		log.Fatalf("worker.Run: %v", err)
 	}
 	logger.Info("dispatch-worker stopped")
-}
-
-// registerWorkflows delegates to Phase 2B's registrations.go.
-func registerWorkflows(w worker.Worker) { registerDispatchWorkflows(w) }
-
-// registerActivities delegates to Phase 2B's registrations.go.
-func registerActivities(w worker.Worker, pool *pgxpool.Pool, c client.Client, logger *logrus.Logger) {
-	registerDispatchActivities(w, pool, c, logger)
 }
 
 // registerSelf inserts the dispatch-worker's row into evo.workers and
