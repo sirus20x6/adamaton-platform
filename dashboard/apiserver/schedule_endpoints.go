@@ -380,8 +380,10 @@ func (s *APIServer) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *APIServer) pauseSchedule(w http.ResponseWriter, r *http.Request)   { s.pauseUnpause(w, r, true) }
-func (s *APIServer) unpauseSchedule(w http.ResponseWriter, r *http.Request) { s.pauseUnpause(w, r, false) }
+func (s *APIServer) pauseSchedule(w http.ResponseWriter, r *http.Request) { s.pauseUnpause(w, r, true) }
+func (s *APIServer) unpauseSchedule(w http.ResponseWriter, r *http.Request) {
+	s.pauseUnpause(w, r, false)
+}
 
 // pauseUnpause is the shared body for /pause and /unpause. Both are POST
 // no-body endpoints that flip the paused bit.
