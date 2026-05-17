@@ -1,0 +1,28 @@
+{
+  "id": "search_govinfo",
+  "name": "GovInfo",
+  "description": "U.S. government publications search via GovInfo (FDsys).",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_govinfo"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "DATA_GOV_API_KEY": {
+        "type": "string",
+        "description": "api.data.gov API key (free at https://api.data.gov/signup/)."
+      }
+    },
+    "required": ["DATA_GOV_API_KEY"]
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

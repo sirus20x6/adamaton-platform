@@ -1,0 +1,39 @@
+{
+  "id": "search_localfs",
+  "name": "Local Files",
+  "description": "Search a local directory of notes/PDFs/text by content (substring match).",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_localfs"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "root_path": {
+        "type": "string",
+        "description": "Absolute path to the directory to search."
+      },
+      "include_extensions": {
+        "type": "array",
+        "items": {"type": "string"},
+        "default": [".md", ".txt", ".pdf"],
+        "description": "File extensions to consider (lowercase, leading dot)."
+      },
+      "max_file_bytes": {
+        "type": "integer",
+        "default": 5000000,
+        "description": "Skip files larger than this many bytes."
+      }
+    },
+    "required": ["root_path"]
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

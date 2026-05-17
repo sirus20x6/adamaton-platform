@@ -1,0 +1,33 @@
+{
+  "id": "search_gitlab",
+  "name": "GitLab",
+  "description": "GitLab.com project search (also configurable to self-hosted instances).",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_gitlab"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "GITLAB_TOKEN": {
+        "type": "string",
+        "description": "Optional GitLab personal access token. Enables private repo search and lifts unauthenticated rate limits."
+      },
+      "base_url": {
+        "type": "string",
+        "description": "Base URL of the GitLab instance, without trailing slash. Defaults to https://gitlab.com for the public SaaS.",
+        "default": "https://gitlab.com"
+      }
+    },
+    "required": []
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

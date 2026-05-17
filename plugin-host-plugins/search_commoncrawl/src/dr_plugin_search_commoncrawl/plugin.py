@@ -1,0 +1,32 @@
+"""Common Crawl search plugin.
+
+The ``q`` argument is a URL pattern (e.g. ``*.example.com/*``), NOT a
+keyword query. Common Crawl's CDX index only supports URL-shape lookups;
+keyword/full-text search is not available here. Non-URL-pattern queries
+return an empty page instead of erroring.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from dr_plugin_sdk import plugin, search
+from dr_plugin_sdk.types import SearchPage
+
+from .adapter import CommonCrawlAdapter
+
+
+@plugin(manifest="../../plugin.json")
+class Plugin:
+    def __init__(self) -> None:
+        self._adapter = CommonCrawlAdapter()
+
+    @search.query
+    async def query(
+        self,
+        q: str,
+        limit: int,
+        cursor: str | None,
+        since: datetime | None,
+    ) -> SearchPage:
+        return await self._adapter.search(q, limit=limit, cursor=cursor, since=since)

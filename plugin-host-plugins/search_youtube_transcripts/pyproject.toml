@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dr-plugin-search-youtube-transcripts"
+version = "0.1.0"
+description = "YouTube video search with transcript-based content retrieval."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+    "dr-plugin-sdk",
+    "grpcio>=1.65",
+    "protobuf>=5,<8",
+    "yt-dlp>=2024.1",
+    "youtube-transcript-api>=0.6",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["dr_plugin_search_youtube_transcripts*"]
+
+[tool.setuptools.package-data]
+"dr_plugin_search_youtube_transcripts" = ["../plugin.json"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.uv.sources]
+dr-plugin-sdk = { path = "../_sdk" }

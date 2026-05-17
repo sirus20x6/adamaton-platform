@@ -1,0 +1,28 @@
+{
+  "id": "search_readwise",
+  "name": "Readwise",
+  "description": "Search Readwise highlights and notes via the Readwise v2 API.",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_readwise"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "READWISE_TOKEN": {
+        "type": "string",
+        "description": "Readwise API access token (read from the READWISE_TOKEN env var)."
+      }
+    },
+    "required": ["READWISE_TOKEN"]
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}
