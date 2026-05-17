@@ -1,0 +1,28 @@
+{
+  "id": "search_nist",
+  "name": "NIST NVD (CVE)",
+  "description": "CVE / vulnerability search via the NIST National Vulnerability Database 2.0 API.",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_nist"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "NVD_API_KEY": {
+        "type": "string",
+        "description": "Optional NVD API key; raises rate limit from 5/30s to 50/30s."
+      }
+    },
+    "required": []
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

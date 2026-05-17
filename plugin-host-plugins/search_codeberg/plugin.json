@@ -1,0 +1,33 @@
+{
+  "id": "search_codeberg",
+  "name": "Codeberg",
+  "description": "Codeberg (Forgejo/Gitea) repository search.",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_codeberg"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "base_url": {
+        "type": "string",
+        "description": "Base URL of the Forgejo/Gitea instance. Defaults to https://codeberg.org.",
+        "default": "https://codeberg.org"
+      },
+      "token": {
+        "type": "string",
+        "description": "Optional Codeberg/Forgejo API token. May also be supplied via the CODEBERG_TOKEN environment variable."
+      }
+    },
+    "required": []
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

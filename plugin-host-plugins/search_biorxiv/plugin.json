@@ -1,0 +1,32 @@
+{
+  "id": "search_biorxiv",
+  "name": "bioRxiv / medRxiv / chemRxiv",
+  "description": "Preprint search across bioRxiv, medRxiv, and chemRxiv via Europe PMC's preprint index.",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_biorxiv"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "servers": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": ["bioRxiv", "medRxiv", "chemRxiv"]
+        },
+        "description": "Optional subset of preprint servers to query. Defaults to all three."
+      }
+    },
+    "required": []
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}
