@@ -54,6 +54,12 @@ var validTag = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,128}$`)
 // in the wild; we accept both for forward compatibility.
 var validService = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
+// maxScaleReplicas caps /scale requests. Anything beyond 16 on a single
+// rack is almost certainly an operator typo; the failure mode (OOM,
+// runaway Temporal pollers) is unpleasant enough that we'd rather a
+// 400 than a melted Pi.
+const maxScaleReplicas = 16
+
 // manifest mirrors the YAML schema in Adamaton/deploy/<host>/MANIFEST.yaml.
 // We only consume Host + Services here; ImageTag is informational.
 type manifest struct {
@@ -117,6 +123,7 @@ func run() error {
 	mux.HandleFunc("/status", s.requireAuth(s.handleStatus))
 	mux.HandleFunc("/restart", s.requireAuth(s.handleRestart))
 	mux.HandleFunc("/restart-all", s.requireAuth(s.handleRestartAll))
+	mux.HandleFunc("/scale", s.requireAuth(s.handleScale))
 
 	srv := &http.Server{
 		Addr:              bind,
@@ -257,6 +264,132 @@ func (s *server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		"tag":     tag,
 		"pull":    tail(string(pullOut), 50),
 		"up":      tail(string(upOut), 50),
+	})
+}
+
+// isScalable decides whether a service is allowed through /scale. v1
+// rule: anything whose name ends in "-worker". The "-worker" suffix is
+// the convention every Temporal worker in the fleet already follows
+// (skills-worker, dispatch-worker, nano-research-worker, evo-worker,
+// reindex-worker, skills-rae-worker). These share two properties that
+// make horizontal scaling safe: they are stateless consumers of a
+// shared queue (Temporal balances tasks across them) and they don't
+// bind a host port. Non-worker services (postgres, caddy, frontend,
+// nano-research, plugin-host, etc.) DO have port/state assumptions
+// and would either fail to start a second replica or silently break
+// the first one, so they're refused here. A future MANIFEST.yaml
+// `scalable:` list could promote specific non-suffix services, but
+// for v1 the heuristic is sufficient and operator-friendly.
+func isScalable(svc string) bool {
+	return strings.HasSuffix(svc, "-worker")
+}
+
+// countReplicas returns the number of running containers for svc by
+// listing IDs from `docker compose ps -q <svc>` and counting non-empty
+// lines. Returns (0, nil) when the service has no containers (not an
+// error -- legitimate state when scaling from cold).
+func (s *server) countReplicas(ctx context.Context, svc string) (int, error) {
+	out, err := s.compose(ctx, "ps", "-q", svc)
+	if err != nil {
+		return 0, fmt.Errorf("ps -q %s: %w (%s)", svc, err, tail(string(out), 10))
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (s *server) handleScale(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	svc := r.URL.Query().Get("service")
+	repStr := r.URL.Query().Get("replicas")
+	if !validService.MatchString(svc) {
+		http.Error(w, "invalid service name", http.StatusBadRequest)
+		return
+	}
+	if _, ok := s.allowed[svc]; !ok {
+		http.Error(w, "service not in allow-list", http.StatusBadRequest)
+		return
+	}
+	if !isScalable(svc) {
+		http.Error(w, "service not scalable (v1: must end in -worker)", http.StatusBadRequest)
+		return
+	}
+	if svc == "deploy-agent" {
+		// Belt + braces: the suffix check already rejects it, but make the
+		// intent loud.
+		http.Error(w, "deploy-agent cannot scale itself", http.StatusBadRequest)
+		return
+	}
+	// Parse replicas as integer manually rather than pulling in strconv-
+	// style flexibility (no underscores, no signs, no leading zeros).
+	// We want to accept exactly the strings 1..16.
+	n := 0
+	for _, c := range repStr {
+		if c < '0' || c > '9' {
+			http.Error(w, "replicas must be an integer 1.."+fmt.Sprintf("%d", maxScaleReplicas), http.StatusBadRequest)
+			return
+		}
+		n = n*10 + int(c-'0')
+		if n > maxScaleReplicas {
+			break
+		}
+	}
+	if n < 1 || n > maxScaleReplicas {
+		http.Error(w, fmt.Sprintf("replicas must be in [1, %d]", maxScaleReplicas), http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	before, err := s.countReplicas(ctx, svc)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"step": "ps-before", "error": err.Error()})
+		return
+	}
+
+	log.Printf("scale: service=%s before=%d target=%d", svc, before, n)
+	// --no-recreate keeps existing containers running while compose adds
+	// only the new ones needed to reach N. Without it, compose would
+	// recreate every container of svc (because it computes a "should I
+	// recreate?" decision from the service block, not from the running
+	// count) -- which would briefly drop ALL workers of this type while
+	// the new ones come up. --no-deps prevents postgres/temporal cascades
+	// for the same reason as /restart.
+	upOut, err := s.compose(ctx, "up", "-d", "--no-deps", "--no-recreate",
+		"--scale", fmt.Sprintf("%s=%d", svc, n), svc)
+	if err != nil {
+		log.Printf("scale: up failed svc=%s target=%d err=%v", svc, n, err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"step":   "up",
+			"error":  err.Error(),
+			"output": tail(string(upOut), 30),
+		})
+		return
+	}
+	after, err := s.countReplicas(ctx, svc)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"step": "ps-after", "error": err.Error()})
+		return
+	}
+	log.Printf("scale: ok svc=%s before=%d after=%d", svc, before, after)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service":   svc,
+		"host":      s.manifest.Host,
+		"before":    before,
+		"after":     after,
+		"requested": n,
+		"compose":   tail(string(upOut), 30),
 	})
 }
 
