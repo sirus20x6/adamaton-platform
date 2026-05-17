@@ -1,0 +1,23 @@
+{
+  "id": "search_sec_edgar",
+  "name": "SEC EDGAR",
+  "description": "SEC EDGAR full-text search of company filings (10-K, 10-Q, 8-K, etc.).",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_sec_edgar"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

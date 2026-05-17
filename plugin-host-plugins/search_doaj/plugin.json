@@ -1,0 +1,28 @@
+{
+  "id": "search_doaj",
+  "name": "DOAJ",
+  "description": "Directory of Open Access Journals - peer-reviewed OA article search.",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_doaj"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "api_key": {
+        "type": "string",
+        "description": "Optional DOAJ API key for higher rate limits."
+      }
+    },
+    "required": []
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

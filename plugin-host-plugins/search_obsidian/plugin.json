@@ -1,0 +1,34 @@
+{
+  "id": "search_obsidian",
+  "name": "Obsidian Vault",
+  "description": "Search an Obsidian vault directory (markdown files with optional YAML frontmatter).",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_obsidian"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "vault_path": {
+        "type": "string",
+        "description": "Absolute path to the Obsidian vault root directory."
+      },
+      "exclude_folders": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Folder names (relative to the vault root) to skip while walking.",
+        "default": [".obsidian", ".trash"]
+      }
+    },
+    "required": ["vault_path"]
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

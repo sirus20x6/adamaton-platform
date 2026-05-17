@@ -1,0 +1,33 @@
+{
+  "id": "search_commoncrawl",
+  "name": "Common Crawl",
+  "description": "URL-pattern search over Common Crawl indexes (no keyword full-text search). The q parameter is a URL pattern like *.example.com/*, not a keyword query.",
+  "version": "0.1.0",
+  "category": "search",
+  "capabilities": ["search.query"],
+  "command": ["/opt/dr-plugin-venv/bin/python", "-m", "dr_plugin_search_commoncrawl"],
+  "transport": "grpc-unix",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "index_id": {
+        "type": "string",
+        "description": "Common Crawl index id, e.g. CC-MAIN-2024-50. Defaults to 'latest'.",
+        "default": "latest"
+      },
+      "crawl": {
+        "type": "string",
+        "description": "Alias for index_id; explicit crawl identifier such as CC-MAIN-2024-50."
+      }
+    },
+    "required": []
+  },
+  "args_schema": {
+    "type": "object",
+    "properties": {}
+  },
+  "supervisor": {
+    "idle_timeout_seconds": 600,
+    "max_restart_per_min": 3
+  }
+}

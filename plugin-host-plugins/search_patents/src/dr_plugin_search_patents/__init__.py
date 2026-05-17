@@ -1,0 +1,1 @@
+"""USPTO PatentsView search plugin."""
