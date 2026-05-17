@@ -467,6 +467,7 @@ func (s *APIServer) setupRoutes() {
 	// which routes the job onto a capable worker's task queue.
 	s.registerWorkerEndpoints(api)
 	s.registerRacksEndpoint(api)
+	s.registerNodesEndpoints(api)
 	s.registerJobsEndpoints(api)
 
 	// Cross-subsystem status fan-out for the unified landing page.
