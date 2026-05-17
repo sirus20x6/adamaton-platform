@@ -41,5 +41,20 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
 FROM alpine:3.21
 RUN apk --no-cache add ca-certificates tzdata
 COPY --from=build /out/api /usr/local/bin/api
+# Workflow-node catalog. The apiserver's resolvePluginDirs() looks for
+# ${EVO_HOME}/plugins/{builtin,community,n8n}; baking the source tree in
+# rather than bind-mounting at compose time keeps the deploy self-contained.
+# An EVO_PLUGIN_DIRS env override still wins if an operator wants to point
+# at a host mount instead. Source tree lives in the evolve sub-repo;
+# accessible here because the build context is the umbrella root.
+#
+# Only `builtin` exists on disk today. mkdir creates the community/n8n
+# siblings so the loader can enumerate them as soon as someone drops
+# YAMLs in (via `go run ./cmd/n8n-import <pkg>` or a manual add) and
+# the image is rebuilt — keeping the catalog purely image-shipped.
+COPY --from=build /src/evolve/workflow-builder/plugins/builtin /opt/evo/plugins/builtin
+RUN mkdir -p /opt/evo/plugins/community /opt/evo/plugins/n8n
+ENV EVO_HOME=/opt/evo
+WORKDIR /opt/evo
 EXPOSE 9123
 ENTRYPOINT ["/usr/local/bin/api"]
