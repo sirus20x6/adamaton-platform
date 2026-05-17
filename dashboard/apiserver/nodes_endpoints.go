@@ -51,9 +51,10 @@ type scalableEstimate struct {
 }
 
 type scalableEntry struct {
-	Service  string           `json:"service"`
-	Running  int              `json:"running"`
-	Estimate scalableEstimate `json:"estimate"`
+	Service     string           `json:"service"`
+	Running     int              `json:"running"`
+	Provisioned bool             `json:"provisioned"`
+	Estimate    scalableEstimate `json:"estimate"`
 }
 
 type headroomBlock struct {
@@ -121,6 +122,36 @@ func deployAgentURLs() map[string]string {
 func (s *APIServer) registerNodesEndpoints(api *mux.Router) {
 	api.HandleFunc("/nodes/{host}/scalable", s.getNodeScalable).Methods("GET")
 	api.HandleFunc("/nodes/{host}/scale", s.postNodeScale).Methods("POST")
+	api.HandleFunc("/nodes/{host}/provision", s.postNodeProvision).Methods("POST")
+}
+
+// fetchAgentCatalog asks the host's deploy-agent for its worker-types
+// catalog (the set of worker services it knows how to provision). Used
+// by getNodeScalable to compose the union of "already running" +
+// "available to provision." Empty slice on any error so the existing
+// MANIFEST workers still render even if the agent is unreachable.
+func fetchAgentCatalog(ctx context.Context, baseURL, token string) []string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/catalog", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var body struct {
+		Workers []string `json:"workers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil
+	}
+	return body.Workers
 }
 
 // resolveRack looks up a rack manifest by host or alias. Returns the
@@ -301,18 +332,114 @@ func (s *APIServer) getNodeScalable(w http.ResponseWriter, r *http.Request) {
 		Headroom: computeHeadroom(host, rack, workers),
 		Scalable: make([]scalableEntry, 0, len(rack.Workers)),
 	}
+	// Provisioned: workers in the rack's MANIFEST (declared in
+	// docker-compose.yml at deploy time). These already have service
+	// blocks; /scale handles them.
+	seen := map[string]bool{}
 	for _, svc := range rack.Workers {
 		if !isScalableService(svc) {
 			continue
 		}
+		seen[svc] = true
 		est, running := estimateFor(svc, host, rack, workers)
 		resp.Scalable = append(resp.Scalable, scalableEntry{
-			Service:  svc,
-			Running:  running,
-			Estimate: est,
+			Service:     svc,
+			Running:     running,
+			Provisioned: true,
+			Estimate:    est,
 		})
 	}
+	// Unprovisioned: worker types the host's deploy-agent advertises
+	// in its catalog but that aren't in MANIFEST yet. The dialog
+	// dispatches /provision (vs /scale) for these.
+	if urls := deployAgentURLs(); urls[rack.Host] != "" {
+		token := os.Getenv("DEPLOY_AGENT_TOKEN")
+		acatalog := fetchAgentCatalog(ctx, urls[rack.Host], token)
+		for _, svc := range acatalog {
+			if seen[svc] || !isScalableService(svc) {
+				continue
+			}
+			seen[svc] = true
+			est, _ := estimateFor(svc, host, rack, workers)
+			resp.Scalable = append(resp.Scalable, scalableEntry{
+				Service:     svc,
+				Running:     0,
+				Provisioned: false,
+				Estimate:    est,
+			})
+		}
+	}
 	writeEvoJSON(w, resp)
+}
+
+// postNodeProvision proxies to the host's deploy-agent /provision,
+// which renders a compose service block from the embedded catalog
+// before bringing the container up. Used by the dialog when the
+// picked service has provisioned=false.
+func (s *APIServer) postNodeProvision(w http.ResponseWriter, r *http.Request) {
+	host := mux.Vars(r)["host"]
+	rack, ok := resolveRack(host)
+	if !ok {
+		writeEvoErr(w, http.StatusNotFound, "unknown host: "+host)
+		return
+	}
+	urls := deployAgentURLs()
+	base, ok := urls[rack.Host]
+	if !ok {
+		writeEvoErr(w, http.StatusServiceUnavailable,
+			"no deploy-agent URL for host "+rack.Host+" (set ADAMATON_DEPLOY_AGENTS env)")
+		return
+	}
+	token := os.Getenv("DEPLOY_AGENT_TOKEN")
+	if token == "" {
+		writeEvoErr(w, http.StatusServiceUnavailable, "DEPLOY_AGENT_TOKEN not set on dashboard")
+		return
+	}
+
+	svc := r.URL.Query().Get("service")
+	replicas := r.URL.Query().Get("replicas")
+	if svc == "" || replicas == "" {
+		writeEvoErr(w, http.StatusBadRequest, "service= and replicas= are both required")
+		return
+	}
+	if !isScalableService(svc) {
+		writeEvoErr(w, http.StatusBadRequest, "service not scalable: "+svc)
+		return
+	}
+
+	upstreamURL := fmt.Sprintf("%s/provision?service=%s&replicas=%s", base, svc, replicas)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, nil)
+	if err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "build request: "+err.Error())
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		writeEvoErr(w, http.StatusBadGateway, "deploy-agent unreachable: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		writeEvoErr(w, http.StatusBadGateway, "deploy-agent body: "+err.Error())
+		return
+	}
+	ct := resp.Header.Get("Content-Type")
+	w.Header().Set("Content-Type", ct)
+	w.WriteHeader(resp.StatusCode)
+	if strings.HasPrefix(ct, "application/json") {
+		_, _ = w.Write(body)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error":         strings.TrimSpace(string(body)),
+		"upstream_code": resp.StatusCode,
+		"upstream_host": rack.Host,
+	})
 }
 
 // postNodeScale is the browser-facing proxy: it injects the deploy-agent

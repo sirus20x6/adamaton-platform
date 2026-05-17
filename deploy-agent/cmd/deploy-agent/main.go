@@ -124,6 +124,8 @@ func run() error {
 	mux.HandleFunc("/restart", s.requireAuth(s.handleRestart))
 	mux.HandleFunc("/restart-all", s.requireAuth(s.handleRestartAll))
 	mux.HandleFunc("/scale", s.requireAuth(s.handleScale))
+	mux.HandleFunc("/provision", s.requireAuth(s.handleProvision))
+	mux.HandleFunc("/catalog", s.requireAuth(s.handleCatalog))
 
 	srv := &http.Server{
 		Addr:              bind,
@@ -393,6 +395,151 @@ func (s *server) handleScale(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCatalog returns the embedded worker-types catalog as a sorted
+// list of service names. Used by the dashboard to keep its UI-side
+// catalog in lockstep with whatever the agent will actually accept.
+func (s *server) handleCatalog(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"host":    s.manifest.Host,
+		"workers": catalogNames(),
+	})
+}
+
+// handleProvision is the "scale a worker that may not yet have a
+// compose service block" variant of /scale. Workflow:
+//  1. Validate svc/replicas (same rules as /scale).
+//  2. If svc is already in the host's MANIFEST allow-list AND already
+//     a compose service in the running stack, behaves identically to
+//     /scale -- just bumps replicas.
+//  3. Otherwise: svc MUST appear in the embedded worker-types catalog.
+//     We merge its compose block into docker-compose.workers.yml
+//     (idempotent) and add svc to the in-memory allow-list, then
+//     run docker compose pull + up -d --scale.
+//
+// The override file is the source of truth for "what this host has
+// been provisioned with beyond its initial MANIFEST." It survives
+// container restarts; on agent boot we re-add any services it lists
+// to the allow-list (TODO -- v1 doesn't persist that, but compose
+// itself rediscovers the blocks via the -f flag in compose()).
+func (s *server) handleProvision(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	svc := r.URL.Query().Get("service")
+	repStr := r.URL.Query().Get("replicas")
+	if !validService.MatchString(svc) {
+		http.Error(w, "invalid service name", http.StatusBadRequest)
+		return
+	}
+	if !isScalable(svc) {
+		http.Error(w, "service not scalable (must end in -worker)", http.StatusBadRequest)
+		return
+	}
+	if svc == "deploy-agent" {
+		http.Error(w, "deploy-agent cannot scale itself", http.StatusBadRequest)
+		return
+	}
+	// Same digit-only replicas parse as /scale.
+	n := 0
+	for _, c := range repStr {
+		if c < '0' || c > '9' {
+			http.Error(w, fmt.Sprintf("replicas must be an integer 1..%d", maxScaleReplicas), http.StatusBadRequest)
+			return
+		}
+		n = n*10 + int(c-'0')
+		if n > maxScaleReplicas {
+			break
+		}
+	}
+	if n < 1 || n > maxScaleReplicas {
+		http.Error(w, fmt.Sprintf("replicas must be in [1, %d]", maxScaleReplicas), http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	provisioned := false
+	if !catalogHas(svc) {
+		// Not in the catalog AND not in MANIFEST = nothing we can do.
+		// Catalog is the source of truth for "what can be provisioned
+		// at runtime"; MANIFEST workers without catalog entries are
+		// the original baked-in services and /scale would handle them.
+		if _, ok := s.allowed[svc]; !ok {
+			http.Error(w, "service not in worker-types catalog and not in host MANIFEST", http.StatusBadRequest)
+			return
+		}
+	} else {
+		// Render into the override file. Idempotent: re-running with
+		// an unchanged catalog produces an unchanged file, so compose
+		// up --no-recreate is a no-op for the existing container.
+		overridePath := filepath.Join(s.composeDir, "docker-compose.workers.yml")
+		added, err := overrideUpsert(overridePath, svc)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"step":  "override-upsert",
+				"error": err.Error(),
+			})
+			return
+		}
+		provisioned = added
+		s.allowed[svc] = struct{}{}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	before, err := s.countReplicas(ctx, svc)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"step": "ps-before", "error": err.Error()})
+		return
+	}
+
+	// Pull first so the up call doesn't block on registry latency
+	// while holding the mutex (well, it would anyway, but at least
+	// the failure mode is clearer when reported separately).
+	pullOut, err := s.compose(ctx, "pull", svc)
+	if err != nil {
+		log.Printf("provision: pull failed svc=%s err=%v", svc, err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"step":   "pull",
+			"error":  err.Error(),
+			"output": tail(string(pullOut), 30),
+		})
+		return
+	}
+
+	log.Printf("provision: service=%s before=%d target=%d provisioned=%v", svc, before, n, provisioned)
+	upOut, err := s.compose(ctx, "up", "-d", "--no-deps", "--no-recreate",
+		"--scale", fmt.Sprintf("%s=%d", svc, n), svc)
+	if err != nil {
+		log.Printf("provision: up failed svc=%s target=%d err=%v", svc, n, err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"step":   "up",
+			"error":  err.Error(),
+			"output": tail(string(upOut), 30),
+		})
+		return
+	}
+	after, err := s.countReplicas(ctx, svc)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"step": "ps-after", "error": err.Error()})
+		return
+	}
+	log.Printf("provision: ok svc=%s before=%d after=%d provisioned=%v", svc, before, after, provisioned)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service":     svc,
+		"host":        s.manifest.Host,
+		"before":      before,
+		"after":       after,
+		"requested":   n,
+		"provisioned": provisioned,
+		"pull":        tail(string(pullOut), 20),
+		"compose":     tail(string(upOut), 30),
+	})
+}
+
 func (s *server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -443,8 +590,17 @@ func (s *server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 // container environments. Without this the per-image
 // ${ADAMATON_<SVC>_TAG} placeholders would always fall through to
 // their :-main defaults regardless of image-tags.env contents.
+//
+// If a docker-compose.workers.yml override file exists in composeDir
+// (written by /provision), include it via a second -f. Compose merges
+// the two: services defined in the override are added to the union,
+// services in both are merged (override wins). Harmless when empty.
 func (s *server) compose(ctx context.Context, args ...string) ([]byte, error) {
 	full := []string{"compose", "--env-file", ".env", "--env-file", "image-tags.env"}
+	full = append(full, "-f", "docker-compose.yml")
+	if _, err := os.Stat(filepath.Join(s.composeDir, "docker-compose.workers.yml")); err == nil {
+		full = append(full, "-f", "docker-compose.workers.yml")
+	}
 	full = append(full, args...)
 	cmd := exec.CommandContext(ctx, s.composeBin, full...)
 	cmd.Dir = s.composeDir
