@@ -57,8 +57,27 @@ RUN set -eux; \
     tar -C / -Jxpf /tmp/s6-overlay-noarch.tar.xz; \
     tar -C / -Jxpf /tmp/s6-overlay-arch.tar.xz; \
     rm /tmp/s6-overlay-*.tar.xz
+ARG GO_TAGS="skills reindex dispatch"
 COPY platform/worker/s6/cont-init.d/ /etc/cont-init.d/
 COPY platform/worker/s6/s6-rc.d/     /etc/s6-overlay/s6-rc.d/
+# Bake the user-bundle contents.d entries at build time, one per queue
+# implied by the GO_TAGS. s6-rc compiles /etc/s6-overlay/s6-rc.d/ once
+# at /init time — BEFORE cont-init.d runs — so the user bundle has to
+# be fully populated by the image, not by a runtime script. The
+# cont-init script remains, but only as a sanity check + log line.
+RUN set -eux; \
+    contents=/etc/s6-overlay/s6-rc.d/user/contents.d; \
+    rm -f "$contents"/.gitkeep "$contents"/.keep; \
+    for tag in ${GO_TAGS}; do \
+      case "$tag" in \
+        skills)   touch "$contents/skills" ;; \
+        reindex)  touch "$contents/reindex-ingest" "$contents/reindex-extract" ;; \
+        dispatch) touch "$contents/dispatch" ;; \
+        evo)      touch "$contents/evo" ;; \
+        *) echo "unknown GO_TAGS entry: $tag" >&2; exit 1 ;; \
+      esac; \
+    done; \
+    ls -1 "$contents"
 COPY --from=build /out/adamaton-worker /usr/local/bin/adamaton-worker
 ENTRYPOINT ["/init"]
 
