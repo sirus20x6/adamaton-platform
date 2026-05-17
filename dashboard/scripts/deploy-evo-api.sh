@@ -1,37 +1,50 @@
 #!/usr/bin/env bash
-# Build the evo dashboard for arm64, package as a docker image, and
-# load+restart the container on the Pi. Idempotent — re-run after every
-# dashboard source change.
+# Build the evo-api image (binary + workflow-node plugin catalog) and ship
+# it to the Pi. Idempotent — re-run after any dashboard source change.
 #
-# Requires: Go toolchain locally, docker locally (buildx + tar pipe),
-#           ssh deepresearch.local with docker access on the Pi.
+# Why this lives in the platform sub-repo but operates on the umbrella:
+# the dashboard's go.mod uses replace directives (../../core, ../../evolve,
+# etc.), so the docker build context MUST be the umbrella root for the
+# build stage to see those sibling sub-repos. The Dockerfile is multi-stage
+# and cross-compiles internally; no host-side `go build` needed.
+#
+# Image tag: defaults to umbrella's short SHA, matching what deploy/pi5/up.sh
+# passes as IMAGE_TAG to docker compose. Override with IMAGE_TAG=<tag>.
+#
+# Requires: docker buildx locally, ssh to the target Pi with docker access.
 
 set -euo pipefail
-cd "$(dirname "$0")/../.."   # repo root
 
-IMAGE="${IMAGE:-evo-api:dev}"
-ARCH="${ARCH:-arm64}"
-SSH_HOST="${SSH_HOST:-deepresearch.local}"
+# Resolve to the umbrella root from anywhere inside the checkout.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+UMBRELLA_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+[[ -f "$UMBRELLA_ROOT/go.work" ]] || {
+    echo "ERROR: could not locate umbrella root from $SCRIPT_DIR" >&2
+    exit 1
+}
 
-echo "==> cross-compiling dashboard/cmd/api for linux/$ARCH"
-mkdir -p dashboard/bin
-GOOS=linux GOARCH="$ARCH" CGO_ENABLED=0 \
-    go build -trimpath -ldflags='-s -w' \
-    -o "dashboard/bin/api-$ARCH" ./dashboard/cmd/api
+PLATFORM_ARCH="${ARCH:-arm64}"
+SSH_HOST="${SSH_HOST:-pi5}"
+IMAGE_TAG="${IMAGE_TAG:-$(git -C "$UMBRELLA_ROOT" rev-parse --short HEAD)}"
+IMAGE="adamaton-evo-api:${IMAGE_TAG}"
 
-echo "==> baking image $IMAGE for linux/$ARCH"
+cd "$UMBRELLA_ROOT"
+
+echo "==> [1/2] building $IMAGE for linux/$PLATFORM_ARCH (umbrella context)"
 docker buildx build \
-    --platform "linux/$ARCH" \
+    --platform "linux/$PLATFORM_ARCH" \
     --output type=docker \
     -t "$IMAGE" \
-    -f dashboard/Dockerfile \
-    dashboard/
+    -f platform/dashboard/Dockerfile \
+    .
 
-echo "==> shipping to $SSH_HOST"
+echo "==> [2/2] saving image -> ssh $SSH_HOST docker load"
 docker save "$IMAGE" | ssh "$SSH_HOST" docker load
 
-echo "==> restarting evo-api on $SSH_HOST"
-ssh "$SSH_HOST" "cd ~/deepresearch && docker compose up -d evo-api"
-
-echo "==> done. tailing recent logs:"
-ssh "$SSH_HOST" "docker logs --tail 25 deepresearch-evo-api-1"
+echo
+echo "Done. $IMAGE is now loaded on $SSH_HOST."
+echo "To bring it up:"
+echo "    bin/adam deploy $SSH_HOST    # rsyncs deploy/pi5/ + docker compose up -d"
+echo
+echo "Or restart just evo-api with the existing compose:"
+echo "    ssh $SSH_HOST \"cd Adamaton-deploy && IMAGE_TAG=$IMAGE_TAG docker compose up -d evo-api\""
