@@ -3,14 +3,31 @@
 # -- plugin code is bind-mounted from PH_PLUGIN_PAYLOADS_DIR at runtime
 # so we can ship/upgrade plugins without rebuilding the host image.
 
-FROM golang:1.25-trixie AS build
+# Build context MUST be the umbrella root (bin/adam ship sets it to "."),
+# because plugin-host/go.mod uses replace directives like ../../core that
+# point at sibling sub-repos. --platform=$BUILDPLATFORM pins this stage
+# to the workstation's native arch (amd64); GOARCH=$TARGETARCH cross-
+# compiles to whatever the runtime image will be. Without that pin every
+# Go syscall runs through qemu-aarch64-static and the build takes 30+min
+# instead of ~30s.
+FROM --platform=$BUILDPLATFORM golang:1.25-trixie AS build
+ARG TARGETARCH
 WORKDIR /src
-# Copy go.work + every workspace member's go.mod first so dep download
-# caches independently of source edits.
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/plugin-host ./cmd/plugin-host
+# Copy every sub-repo + go.work so workspace mode resolves the union of
+# all member go.mods. Without workspace mode dashboard/go.sum is missing
+# entries for deps pulled in transitively by other modules.
+COPY go.work go.work.sum* ./
+COPY core ./core
+COPY knowledge ./knowledge
+COPY deepresearch ./deepresearch
+COPY delegator ./delegator
+COPY evolve ./evolve
+COPY platform ./platform
+
+WORKDIR /src
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags='-s -w' \
+    -o /out/plugin-host ./platform/plugin-host/cmd/plugin-host
 
 FROM debian:trixie-slim
 # ca-certificates so plugin-host can dial outbound TLS (postgres SSL,
