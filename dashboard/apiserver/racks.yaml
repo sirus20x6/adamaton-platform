@@ -58,8 +58,12 @@ racks:
       - figure-renderer
     services: []
 
+  # blackwell + workstation are the same physical box (see memory:
+  # adamaton-blackwell-is-localhost). One rack entry with both hostname
+  # aliases so the dashboard doesn't show the same machine twice when
+  # workers register under one name and sidecars under the other.
   - host: blackwell
-    aliases: [blackwell]
+    aliases: [blackwell, workstation]
     image_tag: main
     workers:
       - evo-worker
@@ -68,12 +72,5 @@ racks:
       - octen-sidecar
       - cluster-sidecar
       - vllm
-    services: []
-
-  - host: workstation
-    aliases: [workstation]
-    image_tag: main
-    workers: []
-    sidecars:
-      - cluster-sidecar
+      - bge-embed
     services: []
