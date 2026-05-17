@@ -10,7 +10,7 @@ syntax = "proto3";
 
 package dr.plugin.v1;
 
-option go_package = "github.com/thearray/evo/plugin-host/gen/go/dr/plugin/v1;pluginv1";
+option go_package = "github.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1;pluginv1";
 
 import "google/protobuf/struct.proto";
 
