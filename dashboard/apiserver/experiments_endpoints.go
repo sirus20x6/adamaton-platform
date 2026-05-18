@@ -153,11 +153,11 @@ type BulkMetricsResponse struct {
 
 // SessionSummary aggregates across all experiments in one agent_session.
 type SessionSummary struct {
-	Count          int        `json:"count"`
-	BestValBPB     *float64   `json:"best_val_bpb"`
-	LatestValBPB   *float64   `json:"latest_val_bpb"`
-	StartedAt      *time.Time `json:"started_at"`
-	LastActiveAt   *time.Time `json:"last_active_at"`
+	Count        int        `json:"count"`
+	BestValBPB   *float64   `json:"best_val_bpb"`
+	LatestValBPB *float64   `json:"latest_val_bpb"`
+	StartedAt    *time.Time `json:"started_at"`
+	LastActiveAt *time.Time `json:"last_active_at"`
 }
 
 // registerExperimentsEndpoints mounts everything on the top router under
@@ -178,8 +178,12 @@ func (s *APIServer) registerExperimentsEndpoints() {
 	r.HandleFunc("/platform/experiments/metrics", s.bulkExperimentMetrics).Methods("GET")
 	r.HandleFunc("/platform/experiments/sessions/{sid}/summary", s.experimentSessionSummary).Methods("GET")
 
-	// Per-experiment metrics. Mounted last so "search"/"metrics"/"sessions"
-	// have already been claimed.
+	// Launch — atomic "create row + kick TrainExperimentWorkflow". Mounted
+	// before the {id} catch-all so "launch" doesn't resolve as an id.
+	r.HandleFunc("/platform/experiments/launch", s.launchExperiment).Methods("POST")
+
+	// Per-experiment metrics. Mounted last so "search"/"metrics"/"sessions"/
+	// "launch" have already been claimed.
 	r.HandleFunc("/platform/experiments/{id}/metrics", s.experimentMetrics).Methods("GET")
 }
 
