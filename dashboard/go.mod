@@ -15,6 +15,7 @@ require (
 	github.com/sirus20x6/adamaton-knowledge/skills v0.0.0
 	github.com/sirus20x6/adamaton-platform/temporal v0.0.0
 	github.com/sirus20x6/adamaton-evolve/workflow-builder v0.0.0
+	github.com/sirus20x6/adamaton-evolve/dataset-manager v0.0.0
 	go.temporal.io/api v1.62.11
 	go.temporal.io/sdk v1.43.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -139,6 +140,7 @@ replace (
 	github.com/sirus20x6/adamaton-delegator/mcp => ../../delegator/mcp
 	github.com/sirus20x6/adamaton-evolve/evolve => ../../evolve/evolve
 	github.com/sirus20x6/adamaton-evolve/workflow-builder => ../../evolve/workflow-builder
+	github.com/sirus20x6/adamaton-evolve/dataset-manager => ../../evolve/dataset-manager
 	github.com/sirus20x6/adamaton-platform/dashboard => ../../platform/dashboard
 	github.com/sirus20x6/adamaton-platform/plugin-host => ../../platform/plugin-host
 	github.com/sirus20x6/adamaton-platform/dispatch => ../../platform/dispatch
