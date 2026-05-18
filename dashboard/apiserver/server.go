@@ -39,6 +39,7 @@ import (
 	"github.com/sirus20x6/adamaton-delegator/delegator/llm"
 	"github.com/sirus20x6/adamaton-evolve/workflow-builder/pluginloader"
 	"github.com/sirus20x6/adamaton-evolve/workflow-builder/workflowstore"
+	"github.com/sirus20x6/adamaton-platform/dashboard/apiserver/health"
 	"github.com/sirus20x6/adamaton-platform/temporal/gitea"
 	"github.com/sirus20x6/adamaton-platform/temporal/workflows"
 )
@@ -195,6 +196,11 @@ type APIServer struct {
 	// scheduler abstracts the Temporal ScheduleClient surface for the
 	// /schedules endpoints. nil means "use temporalClient.ScheduleClient()".
 	scheduler temporalScheduler
+	// fleetHealth + fleetTopology back the /api/v1/health/{fleet,roles,
+	// instances,topology} surface and the /platform/health/ready compat
+	// shim. Both nil when topology.yml couldn't be loaded — handlers 503.
+	fleetHealth   *health.Aggregator
+	fleetTopology *health.Topology
 }
 
 // prFetcher is the narrow slice of *gitea.GiteaClient the trigger path needs.
@@ -400,8 +406,85 @@ func NewAPIServer(config *types.Config, logger *logrus.Logger) (*APIServer, erro
 		inflightSem:    make(chan struct{}, semSize),
 	}
 
+	// Load fleet-health topology (deploy/health/topology.yml). On failure
+	// we log a warning + leave fleetHealth nil; the /api/v1/health/*
+	// surface 503s, the SPA falls back to its degraded-pill state, and
+	// the rest of the apiserver keeps working. Path is overridable for
+	// per-host config layouts.
+	if topo, agg := buildFleetHealth(evoPool, logger); topo != nil {
+		server.fleetTopology = topo
+		server.fleetHealth = agg
+		// Spawn the refresh loop with a background context — apiserver
+		// itself runs for the lifetime of the process. agg.Stop()
+		// would belong in a future Shutdown path; today the process
+		// exit takes the goroutine with it.
+		go agg.Start(context.Background())
+	}
+
 	server.setupRoutes()
 	return server, nil
+}
+
+// buildFleetHealth loads deploy/health/topology.yml (path overridable
+// via HEALTH_TOPOLOGY_PATH env) and constructs the aggregator. Returns
+// nil/nil when the file is missing or invalid — caller logs + falls
+// through; we don't fail server boot on health-check config.
+func buildFleetHealth(pool evoPoolType, logger *logrus.Logger) (*health.Topology, *health.Aggregator) {
+	path := os.Getenv("HEALTH_TOPOLOGY_PATH")
+	if path == "" {
+		// Two sensible defaults: the container-mount location from
+		// docker-compose (/etc/adamaton/) and the repo-relative path
+		// for local dev.
+		for _, candidate := range []string{
+			"/etc/adamaton/health-topology.yml",
+			"deploy/health/topology.yml",
+			"../../../deploy/health/topology.yml",
+		} {
+			if _, err := os.Stat(candidate); err == nil {
+				path = candidate
+				break
+			}
+		}
+	}
+	if path == "" {
+		logger.Warn("fleet-health: no topology.yml found; /api/v1/health/* will 503")
+		return nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		logger.WithError(err).WithField("path", path).
+			Warn("fleet-health: open topology")
+		return nil, nil
+	}
+	defer f.Close()
+	topo, err := health.LoadTopology(f)
+	if err != nil {
+		logger.WithError(err).WithField("path", path).
+			Warn("fleet-health: parse topology")
+		return nil, nil
+	}
+
+	probers := health.Probers{
+		HTTP:  health.NewHTTPProber(envBool("EVO_DASHBOARD_TLS_INSECURE")),
+		TCP:   health.TCPProber{},
+		Redis: health.RedisProber{},
+	}
+	// Postgres + TemporalQueue probers need the pool. evoPoolType is a
+	// type alias for *pgxpool.Pool. When the apiserver doesn't have a
+	// pool wired (Gitea-only deploys, pool is nil), those probes report
+	// unknown / degraded.
+	if pool != nil {
+		probers.Postgres = &health.PostgresProber{Pool: pool}
+		probers.TemporalQueue = &health.TemporalQueueProber{Pool: pool}
+	}
+	fleet := health.NewFleetClient()
+	agg := health.NewAggregator(topo, fleet, probers, 15*time.Second, inferLocalHost())
+	logger.WithFields(logrus.Fields{
+		"path":         path,
+		"roles":        len(topo.Roles),
+		"capabilities": len(topo.Capabilities),
+	}).Info("fleet-health: topology loaded")
+	return topo, agg
 }
 
 // Router returns the HTTP router for testing
@@ -510,6 +593,18 @@ func (s *APIServer) setupRoutes() {
 
 	// Cross-subsystem status fan-out for the unified landing page.
 	api.HandleFunc("/system/status", s.handleSystemStatus).Methods("GET")
+
+	// Fleet health: capability/role/instance rollup backed by
+	// deploy/health/topology.yml + per-host deploy-agent + per-kind
+	// probes. Endpoints 503 when topology failed to load.
+	s.registerHealthEndpoints(api)
+
+	// /platform/health/{ready,live} compat shim — the SPA's existing
+	// useSystemHealth() hook polls these (left over from the retired
+	// Python R2R backend's URL space). Routes adapt the new
+	// aggregator's output to the old {ok, deps:{postgres,redis,sidecar}}
+	// shape so the widget keeps working through the cutover.
+	s.registerPlatformHealthCompat()
 
 	// Read-only proxy onto the deepresearch Pi. Browsers can't talk
 	// to the Pi directly without trusting its self-signed Caddy cert
