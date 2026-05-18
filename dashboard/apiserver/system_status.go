@@ -4,7 +4,6 @@
 // already ported); the rest will be deleted. Do not extend this file --
 // new dashboard work belongs in the deepresearch frontend / platform
 // backend, not here.
-//
 package apiserver
 
 import (
@@ -69,10 +68,9 @@ type SystemStatus struct {
 // SubsystemStatus independently — one slow probe doesn't poison the
 // others.
 func (s *APIServer) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
-	// Parent fan-out budget. 10s covers the slowest sub-check (deepresearch,
-	// 8s) plus slack — its /platform/health is gated on FastAPI workers
-	// which can be saturated under reindex load.
-	parentCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	// Parent fan-out budget. Every sub-check now runs with a 2s ceiling,
+	// so 5s is enough headroom for goroutine schedule + JSON-encode.
+	parentCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
 	var (
@@ -166,10 +164,10 @@ func (s *APIServer) checkSkills(ctx context.Context) SubsystemStatus {
 	}
 	st.Status = "ok"
 	st.Stats = map[string]interface{}{
-		"skills":          skills,
-		"communities":     communities,
-		"usages":          usages,
-		"tasks_today":     recentTasks,
+		"skills":      skills,
+		"communities": communities,
+		"usages":      usages,
+		"tasks_today": recentTasks,
 	}
 	st.LatencyMS = ms(start)
 	return st
@@ -251,17 +249,20 @@ func (s *APIServer) checkWorkflows(ctx context.Context) SubsystemStatus {
 	return st
 }
 
-// checkDeepResearch: GET against the platform health endpoint.
-// InsecureSkipVerify because the Pi uses a self-signed Caddy cert on
-// the LAN — the connection is still encrypted; we're just opting out
-// of CA validation because there's no public CA to issue for a
-// .local hostname. The probe URL is composed by joinHealthURL so the
-// configured base may include or omit a trailing slash with no
-// effect on the resulting request path.
+// checkDeepResearch: GET against r2g's /health endpoint. r2g is the Go
+// replacement for the retired Python R2R backend (per
+// docs/WHERE_DID_IT_GO.md: "platform/backend/ — Python R2R-era code;
+// functionality long since reimplemented in r2g + plugin-host"); the
+// DEEPRESEARCH_URL env var on the Pi now points at http://r2g:7373.
+// The subsystem label stays "deepresearch" to keep continuity with the
+// SPA's status pill — it semantically still means "the deepresearch /
+// RAG plane is up". InsecureSkipVerify is preserved for operators who
+// still point this at the Caddy-fronted https://deepresearch.local on
+// hosts that don't run r2g in-cluster.
 func (s *APIServer) checkDeepResearch(ctx context.Context) SubsystemStatus {
 	start := time.Now()
 	base := s.deepResearchURL()
-	probe := joinHealthURL(base, "/platform/health")
+	probe := joinHealthURL(base, "/health")
 	st := SubsystemStatus{Name: "deepresearch", URL: probe}
 	if base == "" {
 		st.Status = "offline"
@@ -269,11 +270,11 @@ func (s *APIServer) checkDeepResearch(ctx context.Context) SubsystemStatus {
 		st.LatencyMS = ms(start)
 		return st
 	}
-	// 8s vs the 2s used by other checks: /platform/health is gated on
-	// FastAPI workers which can be tied up by pandoc subprocesses during
-	// reindex. The status panel was reporting "offline" for a backend
-	// that was actively serving real work.
-	subCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	// 2s is plenty: r2g's /health is a constant-time JSON write,
+	// not a backend-gated check. (The old probe targeted FastAPI's
+	// /platform/health which could be tied up by reindex subprocesses
+	// and needed 8s.)
+	subCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(subCtx, http.MethodGet, probe, nil)
 	if err != nil {
@@ -308,17 +309,17 @@ func (s *APIServer) checkDeepResearch(ctx context.Context) SubsystemStatus {
 // checkVLLM probes the workstation vLLM endpoint that R2R + the evo
 // memory pipeline both rely on. Returns:
 //
-//   - ``ok``       — endpoint responds and has served at least one
-//                    completion since process start.
-//   - ``degraded`` — endpoint responds but zero completions served
-//                    (likely idle / just-restarted / unwired).
-//   - ``offline``  — /v1/models 4xx/5xx or unreachable.
+//   - “ok“       — endpoint responds and has served at least one
+//     completion since process start.
+//   - “degraded“ — endpoint responds but zero completions served
+//     (likely idle / just-restarted / unwired).
+//   - “offline“  — /v1/models 4xx/5xx or unreachable.
 //
 // We sample /v1/models for liveness + /metrics for the
-// ``vllm:request_success_total`` counter. Stats fan out:
+// “vllm:request_success_total“ counter. Stats fan out:
 //
-//   model_name, requests_running, requests_waiting,
-//   completions_total, prompt_tokens, generation_tokens, uptime_seconds.
+//	model_name, requests_running, requests_waiting,
+//	completions_total, prompt_tokens, generation_tokens, uptime_seconds.
 //
 // vLLM_URL env overrides the default (http://10.0.4.37:9080).
 func (s *APIServer) checkVLLM(ctx context.Context) SubsystemStatus {
