@@ -143,6 +143,15 @@ type temporalDescriber interface {
 	DescribeWorkflowExecution(ctx context.Context, workflowID, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
 }
 
+// temporalScheduler is the narrow slice of client.ScheduleClient the schedule
+// CRUD endpoints depend on. Same testability rationale as the two interfaces
+// above — handlers take this, tests inject a fake without dialing Temporal.
+type temporalScheduler interface {
+	Create(ctx context.Context, opts client.ScheduleOptions) (client.ScheduleHandle, error)
+	GetHandle(ctx context.Context, scheduleID string) client.ScheduleHandle
+	List(ctx context.Context, opts client.ScheduleListOptions) (client.ScheduleListIterator, error)
+}
+
 // Compile-time guards: a real client.Client must satisfy these interfaces so
 // the APIServer can use it without an explicit cast. If a Temporal SDK
 // upgrade ever changes a signature, the build fails instead of letting
@@ -150,6 +159,7 @@ type temporalDescriber interface {
 var (
 	_ temporalStarter   = (client.Client)(nil)
 	_ temporalDescriber = (client.Client)(nil)
+	_ temporalScheduler = (client.ScheduleClient)(nil)
 )
 
 type APIServer struct {
@@ -182,6 +192,9 @@ type APIServer struct {
 	// describer abstracts DescribeWorkflowExecution for the status-poll
 	// path. nil means "use temporalClient".
 	describer temporalDescriber
+	// scheduler abstracts the Temporal ScheduleClient surface for the
+	// /schedules endpoints. nil means "use temporalClient.ScheduleClient()".
+	scheduler temporalScheduler
 }
 
 // prFetcher is the narrow slice of *gitea.GiteaClient the trigger path needs.
@@ -219,6 +232,19 @@ func (s *APIServer) pickDescriber() temporalDescriber {
 		return s.describer
 	}
 	return s.temporalClient
+}
+
+// pickScheduler returns the test stub if set, otherwise the production
+// Temporal client's ScheduleClient. Returns nil only when no Temporal
+// connection was established, in which case the schedule handlers 503.
+func (s *APIServer) pickScheduler() temporalScheduler {
+	if s.scheduler != nil {
+		return s.scheduler
+	}
+	if s.temporalClient == nil {
+		return nil
+	}
+	return s.temporalClient.ScheduleClient()
 }
 
 type APIResponse struct {
@@ -433,6 +459,13 @@ func (s *APIServer) setupRoutes() {
 
 	// Workflow builder
 	s.setupWorkflowBuilderRoutes(api)
+
+	// Temporal schedules CRUD (list/create/get/update/delete + pause /
+	// unpause / trigger). Reads namespace-wide regardless of workflow
+	// kind; create accepts a delegation preset or an advanced
+	// workflow+task-queue+args payload. Requires a live temporalClient
+	// — handlers 503 if pickScheduler() returns nil.
+	s.setupScheduleRoutes(api)
 
 	// Delegator (read-only quota + task views; new delegations still go
 	// through the MCP tool surface).
