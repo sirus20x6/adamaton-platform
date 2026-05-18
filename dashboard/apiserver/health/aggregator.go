@@ -201,52 +201,73 @@ func (a *Aggregator) discoverInstances(ctx context.Context) []InstanceStatus {
 		wg  sync.WaitGroup
 	)
 
-	// Synthesize cluster-singleton instances (postgres / redis /
-	// temporal_queue). These don't appear in `docker compose ps`
-	// against a per-service name in the same way; the role IS the
-	// thing being probed.
-	for _, name := range a.topology.RoleOrder {
-		role := a.topology.Roles[name]
-		switch role.Kind {
-		case KindPostgres, KindRedis, KindTemporalQueue:
-			out = append(out, InstanceStatus{
-				Host:   a.localHost,
-				Role:   name,
-				Status: StatusUnknown, // will be filled by probeInstances
-			})
-		}
-	}
-
 	hosts := a.fleet.Hosts()
-	if len(hosts) == 0 {
-		// No fleet configured — local-only probe model. Still build
-		// instances for every http/tcp role using the role's
-		// probe.host (or implicit role-name DNS) for the local host.
-		for _, name := range a.topology.RoleOrder {
-			role := a.topology.Roles[name]
-			if role.Kind == KindHTTP || role.Kind == KindTCP {
-				out = append(out, InstanceStatus{
-					Host:   a.localHost,
-					Role:   name,
-					Status: StatusUnknown,
-				})
-			}
-		}
-		return out
-	}
 
-	// Real fleet — fan out.
+	// Gather the deploy-agent /services lists per host so we can decide
+	// which roles are "real containers we'll probe per-host" vs which
+	// are "cluster singletons we synthesize at localHost". A role
+	// appears in /services on some host iff it's in that host's
+	// MANIFEST.yaml — postgres / redis / temporal are NOT in the
+	// manifest (they're not deploy-agent-restartable) so they fall to
+	// the singleton synthesis branch below.
+	type hostServices struct {
+		host string
+		svcs []string
+	}
+	servicesByHost := make([]hostServices, 0, len(hosts))
 	for _, host := range hosts {
 		wg.Add(1)
 		go func(h string) {
 			defer wg.Done()
 			svcs, err := a.fleet.Services(ctx, h)
 			if err != nil {
-				// Host unreachable. Don't add instances for it; the
-				// roles that should have run there will count as 0
-				// running, which is the right signal.
-				return
+				return // host unreachable; roles that ran there count 0
 			}
+			mu.Lock()
+			servicesByHost = append(servicesByHost, hostServices{host: h, svcs: svcs})
+			mu.Unlock()
+		}(host)
+	}
+	wg.Wait()
+
+	// Union of services discovered across all hosts — used to decide
+	// which roles need singleton synthesis.
+	discovered := map[string]bool{}
+	for _, hs := range servicesByHost {
+		for _, s := range hs.svcs {
+			discovered[s] = true
+		}
+	}
+
+	// Singleton synthesis: any role whose name doesn't appear in any
+	// host's /services gets a single InstanceStatus at localHost. This
+	// catches:
+	//   - postgres / redis / temporal (kind=postgres|redis|tcp,
+	//     not in manifests because they're not deploy-agent-restartable)
+	//   - temporal_queue roles (no docker container per queue;
+	//     the role IS the thing being probed via evo.workers)
+	//   - any future declared-but-not-yet-running role
+	for _, name := range a.topology.RoleOrder {
+		role := a.topology.Roles[name]
+		// temporal_queue ALWAYS goes through the singleton path even
+		// if a similarly-named docker service exists, since its probe
+		// hits evo.workers not the container.
+		if discovered[name] && role.Kind != KindTemporalQueue {
+			continue
+		}
+		out = append(out, InstanceStatus{
+			Host:   a.localHost,
+			Role:   name,
+			Status: StatusUnknown,
+		})
+	}
+
+	// Per-host container instances for roles that ARE in deploy-agent
+	// manifests. Fans out /status?service=X to get container details.
+	for _, hs := range servicesByHost {
+		wg.Add(1)
+		go func(host string, svcs []string) {
+			defer wg.Done()
 			roleSet := map[string]bool{}
 			for _, name := range a.topology.RoleOrder {
 				role := a.topology.Roles[name]
@@ -258,11 +279,11 @@ func (a *Aggregator) discoverInstances(ctx context.Context) []InstanceStatus {
 				if !roleSet[svc] {
 					continue
 				}
-				containers, err := a.fleet.Status(ctx, h, svc)
+				containers, err := a.fleet.Status(ctx, host, svc)
 				if err != nil || len(containers) == 0 {
 					mu.Lock()
 					out = append(out, InstanceStatus{
-						Host:   h,
+						Host:   host,
 						Role:   svc,
 						Status: StatusOffline,
 						Detail: "no running container",
@@ -273,7 +294,7 @@ func (a *Aggregator) discoverInstances(ctx context.Context) []InstanceStatus {
 				for _, c := range containers {
 					mu.Lock()
 					out = append(out, InstanceStatus{
-						Host:      h,
+						Host:      host,
 						Role:      svc,
 						Container: c.Name,
 						Image:     c.Image,
@@ -282,7 +303,7 @@ func (a *Aggregator) discoverInstances(ctx context.Context) []InstanceStatus {
 					mu.Unlock()
 				}
 			}
-		}(host)
+		}(hs.host, hs.svcs)
 	}
 	wg.Wait()
 	return out

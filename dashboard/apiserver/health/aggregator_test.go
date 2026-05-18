@@ -1,8 +1,10 @@
 package health
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestComputeRoleStatus(t *testing.T) {
@@ -167,4 +169,51 @@ func mustParse(t *testing.T, body string) *Topology {
 		t.Fatalf("parse: %v", err)
 	}
 	return topo
+}
+
+func TestDiscoverInstances_synthesisCoversInfraRoles(t *testing.T) {
+	// Regression: redis (kind:tcp) + temporal (kind:tcp) + postgres
+	// must all be synthesized as cluster-singleton instances even when
+	// they don't appear in any host's deploy-agent /services list,
+	// because infra services aren't in MANIFEST.yaml.services.
+	topo := mustParse(t, `
+roles:
+  postgres:
+    kind: postgres
+    min_healthy: 1
+  redis:
+    kind: tcp
+    probe: { port: 6379, timeout: 100ms }
+    min_healthy: 1
+  temporal:
+    kind: tcp
+    probe: { port: 7233, timeout: 100ms }
+    min_healthy: 1
+  r2g:
+    kind: http
+    probe: { port: 7373, path: /health, timeout: 100ms }
+    min_healthy: 1
+capabilities:
+  data:
+    label: Data
+    roles: [postgres, redis, temporal]
+  rag:
+    label: RAG
+    roles: [r2g]
+`)
+	// No-fleet path (FleetClient with empty ADAMATON_DEPLOY_AGENTS).
+	// We want every declared role synthesized.
+	a := NewAggregator(topo, NewFleetClient(), Probers{}, time.Hour, "testhost")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	insts := a.discoverInstances(ctx)
+	roles := map[string]bool{}
+	for _, inst := range insts {
+		roles[inst.Role] = true
+	}
+	for _, want := range []string{"postgres", "redis", "temporal", "r2g"} {
+		if !roles[want] {
+			t.Fatalf("role %q not synthesized (got %v)", want, roles)
+		}
+	}
 }
