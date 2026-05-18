@@ -503,6 +503,11 @@ func (s *APIServer) setupRoutes() {
 	s.registerNodesEndpoints(api)
 	s.registerJobsEndpoints(api)
 
+	// Dataset manager — read views over evo_datasets + register/import
+	// POSTs. The dataset-worker (evolve/dataset-manager) owns the
+	// version lifecycle; this just reads + kicks Temporal workflows.
+	s.registerDatasetsEndpoints(api)
+
 	// Cross-subsystem status fan-out for the unified landing page.
 	api.HandleFunc("/system/status", s.handleSystemStatus).Methods("GET")
 
