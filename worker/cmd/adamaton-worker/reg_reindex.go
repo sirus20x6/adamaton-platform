@@ -58,6 +58,11 @@ func setupReindexQueue(b *bootCtx, side string) (*queueRuntime, error) {
 	platformURL := coreboot.EnvOr("PLATFORM_BASE_URL", "https://deepresearch.local")
 	r2gURL := os.Getenv("R2G_URL")
 	arxivSkipURL := os.Getenv("ARXIV_SKIP_URL")
+	// Embedding sidecar for the ingest-side ChunkEmbedPersist activity.
+	// Prefer the native llama-server endpoint (BGE_EMBED_URL); fall back to
+	// the legacy Python sidecar (BGE_SIDECAR_URL) during the migration.
+	embedURL := coreboot.EnvOr("BGE_EMBED_URL", os.Getenv("BGE_SIDECAR_URL"))
+	embedModel := coreboot.EnvOr("REINDEX_EMBED_MODEL", "bge-m3")
 
 	concurrencyEnv := "REINDEX_INGEST_CONCURRENCY"
 	identity := "reindex-worker:ingest"
@@ -93,6 +98,8 @@ func setupReindexQueue(b *bootCtx, side string) (*queueRuntime, error) {
 		PlatformURL:  platformURL,
 		R2GURL:       r2gURL,
 		ArxivSkipURL: arxivSkipURL,
+		EmbedURL:     embedURL,
+		EmbedModel:   embedModel,
 	}
 	if side == "ingest" {
 		reindexentry.RegisterIngest(w, deps)
