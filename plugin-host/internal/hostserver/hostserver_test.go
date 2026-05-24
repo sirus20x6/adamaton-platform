@@ -7,6 +7,8 @@ package hostserver
 import (
 	"context"
 	"errors"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/sirus20x6/adamaton-core/blobstore"
 	pluginv1 "github.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/stage"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/supervisor"
@@ -277,10 +280,114 @@ func TestUpsertImportRowHappyPath(t *testing.T) {
 	}
 }
 
+// fakeBlobs is a minimal in-memory blobstore.Backend for the commit-trigger
+// test. Only Put + Stat are exercised by the zotero PDF commit path.
+type fakeBlobs struct{ objs map[string][]byte }
+
+func (f *fakeBlobs) EnsureBucket(context.Context) error { return nil }
+func (f *fakeBlobs) Put(_ context.Context, key string, r io.Reader, _ int64) (blobstore.ObjectRef, error) {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return blobstore.ObjectRef{}, err
+	}
+	f.objs[key] = b
+	return blobstore.ObjectRef{Bucket: "dr-uploads", Key: key, Size: int64(len(b))}, nil
+}
+func (f *fakeBlobs) PutMultipart(ctx context.Context, key string, r io.Reader) (blobstore.ObjectRef, error) {
+	return f.Put(ctx, key, r, -1)
+}
+func (f *fakeBlobs) Get(context.Context, string) (io.ReadCloser, error) {
+	return nil, blobstore.ErrNotFound
+}
+func (f *fakeBlobs) Stat(_ context.Context, key string) (blobstore.ObjectRef, error) {
+	b, ok := f.objs[key]
+	if !ok {
+		return blobstore.ObjectRef{}, blobstore.ErrNotFound
+	}
+	return blobstore.ObjectRef{Bucket: "dr-uploads", Key: key, Size: int64(len(b))}, nil
+}
+func (f *fakeBlobs) List(context.Context, string, int) ([]blobstore.ObjectRef, error) {
+	return nil, nil
+}
+func (f *fakeBlobs) Delete(_ context.Context, key string) error { delete(f.objs, key); return nil }
+
+// TestUpsertImportRowCommitsStagedZoteroPDF verifies the commit trigger:
+// once the zotero plugin has staged a PDF and calls UpsertImportRow, the
+// host pushes the bytes to the blob store at zotero/<key>.pdf and removes
+// the local copy.
+func TestUpsertImportRowCommitsStagedZoteroPDF(t *testing.T) {
+	root := t.TempDir()
+	blobs := &fakeBlobs{objs: map[string][]byte{}}
+	stg := stage.New(root, blobs)
+
+	// Simulate the plugin having written its PDF to the staged path.
+	local, err := stg.LegacyZoteroPath("ABCD1234.pdf")
+	if err != nil {
+		t.Fatalf("LegacyZoteroPath: %v", err)
+	}
+	if err := os.WriteFile(local, []byte("%PDF-1.7 body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db := &fakeDB{nextRow: &fakeRow{values: []any{"row-id"}}}
+	row, err := structpb.NewStruct(map[string]any{
+		"zotero_user_id": "users/1",
+		"zotero_key":     "ABCD1234",
+		"canonical_id":   "10.1/abc",
+		"canonical_kind": "doi",
+		"ingest_status":  "queued",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{db: db, Stage: stg}
+	if _, err := s.UpsertImportRow(ctxWithPlugin("zotero"), &pluginv1.UpsertImportRowRequest{
+		Table: "zotero_imports",
+		Row:   row,
+	}); err != nil {
+		t.Fatalf("UpsertImportRow: %v", err)
+	}
+
+	if got := string(blobs.objs["zotero/ABCD1234.pdf"]); got != "%PDF-1.7 body" {
+		t.Errorf("blob at zotero/ABCD1234.pdf = %q, want committed PDF bytes", got)
+	}
+	if _, statErr := os.Stat(local); !os.IsNotExist(statErr) {
+		t.Errorf("local staged PDF still present after commit: %v", statErr)
+	}
+}
+
+// TestUpsertImportRowNoStagedPDFIsNoop verifies the common web_api / DOI
+// path where no PDF was staged: the upsert succeeds and the commit step is
+// a silent no-op (no error, nothing in the blob store).
+func TestUpsertImportRowNoStagedPDFIsNoop(t *testing.T) {
+	blobs := &fakeBlobs{objs: map[string][]byte{}}
+	stg := stage.New(t.TempDir(), blobs)
+	db := &fakeDB{nextRow: &fakeRow{values: []any{"row-id"}}}
+	row, err := structpb.NewStruct(map[string]any{
+		"zotero_user_id": "users/1",
+		"zotero_key":     "NOPDF999",
+		"canonical_id":   "10.1/x",
+		"canonical_kind": "doi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{db: db, Stage: stg}
+	if _, err := s.UpsertImportRow(ctxWithPlugin("zotero"), &pluginv1.UpsertImportRowRequest{
+		Table: "zotero_imports",
+		Row:   row,
+	}); err != nil {
+		t.Fatalf("UpsertImportRow: %v", err)
+	}
+	if len(blobs.objs) != 0 {
+		t.Errorf("expected no blobs committed, got %v", blobs.objs)
+	}
+}
+
 // ----- StagePath ------------------------------------------------------
 
 func TestStagePathSanitisesPathTraversal(t *testing.T) {
-	stg := stage.New(t.TempDir())
+	stg := stage.New(t.TempDir(), nil)
 	s := &Server{Stage: stg}
 	_, err := s.StagePath(ctxWithPlugin("zotero"), &pluginv1.StagePathRequest{
 		Filename: "../etc/passwd",
@@ -292,7 +399,7 @@ func TestStagePathSanitisesPathTraversal(t *testing.T) {
 
 func TestStagePathZoteroPDFUsesLegacyLayout(t *testing.T) {
 	root := t.TempDir()
-	stg := stage.New(root)
+	stg := stage.New(root, nil)
 	s := &Server{Stage: stg}
 	resp, err := s.StagePath(ctxWithPlugin("zotero"), &pluginv1.StagePathRequest{
 		Filename:    "ABCD.pdf",
@@ -310,7 +417,7 @@ func TestStagePathZoteroPDFUsesLegacyLayout(t *testing.T) {
 
 func TestStagePathGenericUsesPluginLayout(t *testing.T) {
 	root := t.TempDir()
-	stg := stage.New(root)
+	stg := stage.New(root, nil)
 	s := &Server{Stage: stg}
 	resp, err := s.StagePath(ctxWithPlugin("search_arxiv"), &pluginv1.StagePathRequest{
 		Filename:    "doc.json",
