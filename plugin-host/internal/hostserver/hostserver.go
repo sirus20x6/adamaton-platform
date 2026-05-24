@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -294,7 +295,59 @@ func (s *Server) UpsertImportRow(ctx context.Context, req *pluginv1.UpsertImport
 	if err := scanRow.Scan(&id); err != nil {
 		return nil, status.Errorf(codes.Internal, "upsert zotero_imports: %v", err)
 	}
+
+	// Commit point: this RPC is the signal that the zotero plugin has
+	// finished staging the item. The plugin's flow is stage_path(<key>.pdf)
+	// -> copyfile -> upsert_import_row, so by the time we get here the PDF
+	// (if any) is fully written to the container-local staging dir. Push it
+	// to the shared Garage blob store at zotero/<key>.pdf and delete the
+	// local copy; knowledge/r2g's ingest reads it back via blobstore.Get.
+	// Best-effort: a missing local file is normal (web_api / DOI / arxiv
+	// rows never stage a PDF), and a commit failure is logged but does NOT
+	// fail the upsert -- the row is already durable and the blob can be
+	// re-staged on a retry.
+	s.commitZoteroPDF(ctx, zKey)
+
 	return &pluginv1.UpsertImportRowResponse{Id: id}, nil
+}
+
+// commitZoteroPDF moves a just-staged zotero PDF from the container-local
+// staging dir into the shared Garage blob store at zotero/<key>.pdf, then
+// removes the local copy. It is a no-op when no blob store is configured,
+// when the stager is absent, or when no local PDF was staged for this key
+// (the common case for web_api / DOI / arxiv rows). All failures are
+// logged, never returned: the zotero_imports row is already committed and
+// re-staging is idempotent.
+func (s *Server) commitZoteroPDF(ctx context.Context, zoteroKey string) {
+	if s.Stage == nil || !s.Stage.HasBlobStore() || zoteroKey == "" {
+		return
+	}
+	filename := zoteroKey + ".pdf"
+	localPath, err := s.Stage.LegacyZoteroPath(filename)
+	if err != nil {
+		return
+	}
+	key, err := s.Stage.ZoteroKey(filename)
+	if err != nil {
+		return
+	}
+	ref, err := s.Stage.CommitFile(ctx, localPath, key)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return // no PDF staged for this row -- expected
+		}
+		if s.Logger != nil {
+			s.Logger.WithError(err).WithField("key", key).
+				Warn("hostserver: commit zotero pdf to blob store failed")
+		}
+		return
+	}
+	if s.Logger != nil {
+		s.Logger.WithFields(logrus.Fields{
+			"key":  ref.Key,
+			"size": ref.Size,
+		}).Debug("hostserver: committed zotero pdf to blob store")
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -315,9 +368,16 @@ func (s *Server) StagePath(ctx context.Context, req *pluginv1.StagePathRequest) 
 	}
 	contentType := req.GetContentType()
 
-	// Forward-compat shim: the legacy ingest worker reads PDFs out of
-	// /var/lib/dr-uploads/zotero/<key>.pdf. As long as that worker still
-	// exists, the zotero plugin's PDFs need to land there.
+	// Zotero PDFs keep the legacy zotero/<key>.pdf layout. The path the
+	// plugin writes to is now a CONTAINER-LOCAL ephemeral staging dir
+	// (PH_STAGE_DIR), not the old NFS-backed /var/lib/dr-uploads volume.
+	// Nothing reads the local file directly anymore: once the plugin has
+	// written the PDF and calls UpsertImportRow, the host commits the
+	// bytes to the shared Garage blob store at object key zotero/<key>.pdf
+	// (bucket dr-uploads) and deletes the local copy. knowledge/r2g's
+	// ingest then reads the blob back via blobstore.Get -- the standalone
+	// "legacy ingest worker reads files off the shared volume" path is
+	// being retired.
 	if pluginID == "zotero" && strings.Contains(strings.ToLower(contentType), "pdf") {
 		path, err := s.Stage.LegacyZoteroPath(filename)
 		if err != nil {

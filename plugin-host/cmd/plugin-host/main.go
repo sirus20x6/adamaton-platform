@@ -15,10 +15,19 @@
 //	PH_MANIFEST_DIR          — manifest scan root (default /etc/deepresearch/plugins)
 //	PH_PLUGIN_PAYLOADS_DIR   — bind-mounted plugin code (default /opt/dr-plugins)
 //	PH_SOCKET_DIR            — socket pair location (default /run/dr-plugins)
-//	PH_DR_UPLOADS_DIR        — file staging root (default /var/lib/dr-uploads)
+//	PH_STAGE_DIR             — container-local ephemeral staging root
+//	                          (default /run/ph-stage). Plugins write blobs
+//	                          here; the host commits them to the shared
+//	                          Garage blob store (bucket dr-uploads) and
+//	                          deletes the local copy.
 //	PLUGIN_HOST_SECRET_KEY   — base64 32-byte AES-GCM key (required, no default)
 //	PH_LOG_LEVEL             — logrus level (default "info")
 //	PH_LOG_FORMAT            — "text" or "json" (default "text")
+//
+// Blob storage (shared Garage / S3) is configured via the canonical
+// BLOBSTORE_* variables read by core/blobstore.ConfigFromEnv; see that
+// package for the full list. When BLOBSTORE_ENDPOINT is unset the host
+// still boots, but staging operations fail soft (503 / commit no-op).
 package main
 
 import (
@@ -39,6 +48,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 
+	"github.com/sirus20x6/adamaton-core/blobstore"
 	pluginv1 "github.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/hostserver"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/manifest"
@@ -69,7 +79,7 @@ func run() error {
 	manifestDir := envOr("PH_MANIFEST_DIR", "/etc/deepresearch/plugins")
 	payloadsDir := envOr("PH_PLUGIN_PAYLOADS_DIR", "/opt/dr-plugins")
 	socketDir := envOr("PH_SOCKET_DIR", "/run/dr-plugins")
-	uploadsDir := envOr("PH_DR_UPLOADS_DIR", "/var/lib/dr-uploads")
+	stageDir := envOr("PH_STAGE_DIR", "/run/ph-stage")
 	secretKey := os.Getenv("PLUGIN_HOST_SECRET_KEY")
 	if secretKey == "" {
 		return errors.New("PLUGIN_HOST_SECRET_KEY is required")
@@ -106,11 +116,32 @@ func run() error {
 	if err := os.MkdirAll(socketDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir socket dir: %w", err)
 	}
-	if err := os.MkdirAll(uploadsDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir uploads dir: %w", err)
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir stage dir: %w", err)
 	}
 
-	stager := stage.New(uploadsDir)
+	// Shared Garage / S3 blob store (bucket dr-uploads). Built from the
+	// canonical BLOBSTORE_* env. When BLOBSTORE_ENDPOINT is unset we fail
+	// soft: the host still boots, but the stager has no durable backend and
+	// staging operations return 503 / commit no-ops. Any other config or
+	// connectivity error is fatal -- a misconfigured store should not boot
+	// silently and lose blobs.
+	var blobs blobstore.Backend
+	if os.Getenv("BLOBSTORE_ENDPOINT") != "" {
+		s3, err := blobstore.NewS3(ctx, blobstore.ConfigFromEnv("dr-uploads"))
+		if err != nil {
+			return fmt.Errorf("blobstore: %w", err)
+		}
+		if err := s3.EnsureBucket(ctx); err != nil {
+			return fmt.Errorf("blobstore ensure bucket: %w", err)
+		}
+		blobs = s3
+		logger.Info("blob store ready (bucket dr-uploads)")
+	} else {
+		logger.Warn("BLOBSTORE_ENDPOINT unset; staging operations will fail soft (503)")
+	}
+
+	stager := stage.New(stageDir, blobs)
 	store := persist.New(pool)
 	hostSrv := hostserver.New(pool, logger, store, sec, stager)
 
