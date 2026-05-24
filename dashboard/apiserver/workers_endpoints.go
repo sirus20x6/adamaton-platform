@@ -4,7 +4,6 @@
 // already ported); the rest will be deleted. Do not extend this file --
 // new dashboard work belongs in the deepresearch frontend / platform
 // backend, not here.
-//
 package apiserver
 
 // Worker registry endpoints used by the Nodes UI to surface the
@@ -15,6 +14,7 @@ package apiserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -52,12 +52,22 @@ type Worker struct {
 	// worker is on a non-Linux host, when the very first tick hasn't
 	// landed yet (CPU% needs a delta), or when the /proc probe failed.
 	// Migration 0010 adds the underlying columns.
-	CPUPct        *float64  `json:"cpu_pct,omitempty"`
-	RAMUsedGB     *float64  `json:"ram_used_gb,omitempty"`
-	LoadAvg1m     *float64  `json:"load_avg_1m,omitempty"`
-	JobsAssigned   int       `json:"jobs_assigned"`
-	JobsCompleted  int       `json:"jobs_completed"`
+	CPUPct        *float64 `json:"cpu_pct,omitempty"`
+	RAMUsedGB     *float64 `json:"ram_used_gb,omitempty"`
+	LoadAvg1m     *float64 `json:"load_avg_1m,omitempty"`
+	JobsAssigned  int      `json:"jobs_assigned"`
+	JobsCompleted int      `json:"jobs_completed"`
 }
+
+// workerHeartbeatMaxAgeSeconds is the staleness threshold (in seconds)
+// applied on the read path. It mirrors the temporal_queue roles'
+// heartbeat_max_age in deploy/health/topology.yml (90s = 3× the 30s
+// heartbeat period). A stored status of 'active' whose last heartbeat is
+// older than this is reported as 'stale'; older than 5× this is reported
+// as 'offline'. Crashed workers never write 'offline' themselves (only a
+// clean shutdown does, and there is no reaper), so without this
+// derivation a dead worker would show 'active'/green forever.
+const workerHeartbeatMaxAgeSeconds = 90
 
 // registerWorkerEndpoints mounts the read-only worker views. Wired
 // into the /api/v1 subrouter by server.go's setupRoutes.
@@ -68,15 +78,38 @@ func (s *APIServer) registerWorkerEndpoints(api *mux.Router) {
 
 // workersSelectSQL is the shared column list + LATERAL joins. The
 // joins compute per-worker job counts so the UI can show "3 running /
-// 142 completed" without a second round-trip. Status ordering puts
-// healthy workers first ('online' < 'stale' alphabetically is the
-// pleasant accident we lean on; an explicit CASE would only matter
-// once more statuses land).
-const workersSelectSQL = `
+// 142 completed" without a second round-trip.
+//
+// The status column is no longer selected raw: crashed workers never
+// flip their stored status away from 'active' (no reaper exists), so we
+// derive an EFFECTIVE status from the heartbeat age. A stored 'active'
+// row whose last_heartbeat has aged past workerHeartbeatMaxAgeSeconds
+// becomes 'stale', and past 5× that becomes 'offline'. Non-'active'
+// stored statuses (draining, banned, a clean-shutdown 'offline', …) pass
+// through untouched. Doing the CASE here keeps the read path and the
+// ORDER BY in lockstep so stale/offline workers sort to the bottom of
+// the grid instead of masquerading as healthy.
+//
+// %[1]d is the heartbeat staleness threshold in seconds; it is rendered
+// once via fmt.Sprintf below so workerHeartbeatMaxAgeSeconds stays the
+// single source of truth.
+var workersSelectSQL = fmt.Sprintf(workersSelectSQLTmpl, workerHeartbeatMaxAgeSeconds)
+
+const workersSelectSQLTmpl = `
 SELECT w.id, w.identity, w.hostname, w.tailscale_ip, w.declared_queues,
        w.cpu_arch, w.cpu_features, w.cpu_count, w.ram_gb,
        w.gpu_model, w.gpu_count, w.gpu_vram_gb, w.driver_version,
-       w.permissions, w.status, w.last_heartbeat, w.first_seen, w.last_seen,
+       w.permissions,
+       CASE
+         WHEN w.status = 'active'
+              AND EXTRACT(EPOCH FROM (NOW() - w.last_heartbeat)) > 5 * %[1]d
+           THEN 'offline'
+         WHEN w.status = 'active'
+              AND EXTRACT(EPOCH FROM (NOW() - w.last_heartbeat)) > %[1]d
+           THEN 'stale'
+         ELSE w.status
+       END AS status,
+       w.last_heartbeat, w.first_seen, w.last_seen,
        w.cpu_pct, w.ram_used_gb, w.load_avg_1m,
        COALESCE(a.cnt, 0) AS jobs_assigned,
        COALESCE(c.cnt, 0) AS jobs_completed
@@ -102,8 +135,12 @@ func (s *APIServer) listWorkers(w http.ResponseWriter, r *http.Request) {
 	// Default of 200 preserves the historical "no limit, but realistic
 	// fleet size" behaviour while still bounding hostile queries.
 	limit, offset := parseLimitOffset(r, 200, 500, 100000)
+	// Order by the DERIVED status (the CASE alias), not w.status: a stale
+	// or offline worker still has raw w.status = 'active', so ordering by
+	// the raw column would leave dead workers interleaved with healthy
+	// ones instead of sinking them to the bottom of the grid.
 	rows, err := s.evoPool.Query(ctx, workersSelectSQL+`
-		ORDER BY w.status ASC, w.identity ASC, w.hostname ASC
+		ORDER BY status ASC, w.identity ASC, w.hostname ASC
 		LIMIT $1 OFFSET $2
 	`, limit, offset)
 	if err != nil {
