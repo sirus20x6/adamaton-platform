@@ -181,9 +181,15 @@ func (s *APIServer) loadActiveWorkers(ctx context.Context) ([]Worker, error) {
 	if s.evoPool == nil {
 		return nil, nil
 	}
-	rows, err := s.evoPool.Query(ctx, workersSelectSQL+`
+	// Only count workers whose heartbeat is fresh: a crashed worker keeps
+	// its stored status = 'active' (no reaper writes 'offline'), so without
+	// the freshness predicate dead rows would inflate the active count and
+	// the headroom estimate. The interval mirrors workerHeartbeatMaxAgeSeconds
+	// / topology.yml's heartbeat_max_age (90s).
+	rows, err := s.evoPool.Query(ctx, workersSelectSQL+fmt.Sprintf(`
 WHERE w.status = 'active'
-ORDER BY w.identity ASC`)
+  AND w.last_heartbeat > NOW() - make_interval(secs => %d)
+ORDER BY w.identity ASC`, workerHeartbeatMaxAgeSeconds))
 	if err != nil {
 		return nil, err
 	}
