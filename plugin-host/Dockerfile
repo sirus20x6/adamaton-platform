@@ -15,9 +15,14 @@ ARG TARGETARCH
 WORKDIR /src
 # Copy every sub-repo + go.work so workspace mode resolves the union of
 # all member go.mods. Without workspace mode dashboard/go.sum is missing
-# entries for deps pulled in transitively by other modules.
+# entries for deps pulled in transitively by other modules. ztok is copied
+# too: plugin-host imports ztok-go (github.com/sirus20x6/ztok-go), whose
+# replace target is ./ztok/bindings/go — absent it, the build fails reading
+# /src/ztok/bindings/go/go.mod. (CGO_ENABLED=0 here, so we only need the
+# pure-Go binding source, not the compiled libztok.a.)
 COPY go.work go.work.sum* ./
 COPY core ./core
+COPY ztok ./ztok
 COPY knowledge ./knowledge
 COPY deepresearch ./deepresearch
 COPY delegator ./delegator
