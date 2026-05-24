@@ -6,15 +6,21 @@
 //
 // Endpoints:
 //
-//   POST /platform/zotero/sync           — kicks a web_api sync
-//   POST /platform/zotero/upload-sqlite  — multipart upload + sync from a
-//                                          user-uploaded zotero.sqlite
+//	POST /platform/zotero/sync           — kicks a web_api sync
+//	POST /platform/zotero/upload-sqlite  — multipart upload + sync from a
+//	                                       user-uploaded zotero.sqlite
 //
-// upload-sqlite is the long one: it streams the sqlite file to the
-// shared dr_uploads volume, optionally extracts a storage/ tarball with
-// a path-traversal guard, persists the resolved paths into the zotero
-// plugin's config so the next run picks them up, and writes a
-// platform.plugin_runs row so the frontend's poller can track progress.
+// upload-sqlite is the long one: it streams the sqlite file to a
+// container-local ephemeral staging dir (PH_STAGE_DIR -- NOT the old
+// NFS-backed dr_uploads volume), optionally extracts a storage/ tarball
+// with a path-traversal guard, mirrors the staged sqlite into the shared
+// Garage blob store (bucket dr-uploads, plugin/<...> key prefix) for
+// durability, persists the resolved local paths into the zotero plugin's
+// config so the next run picks them up, and writes a platform.plugin_runs
+// row so the frontend's poller can track progress. The zotero plugin
+// subprocess shares the host's filesystem, so it reads the local staged
+// copy directly on the next sync; the blob-store mirror is the durable
+// record that survives an ephemeral-dir wipe.
 package routes
 
 import (
@@ -191,9 +197,9 @@ func zoteroSyncStatusHandler(pool *pgxpool.Pool, logger *logrus.Logger) http.Han
 	return func(w http.ResponseWriter, req *http.Request) {
 		jobID := mux.Vars(req)["job_id"]
 		var (
-			status                           string
-			totalsBytes                      []byte
-			startedAt, finishedAt, errMsg    *string
+			status                        string
+			totalsBytes                   []byte
+			startedAt, finishedAt, errMsg *string
 		)
 		err := pool.QueryRow(req.Context(), `
 			SELECT status, totals,
@@ -262,7 +268,7 @@ func zoteroImportsListHandler(pool *pgxpool.Pool, logger *logrus.Logger) http.Ha
 		items := []map[string]any{}
 		for rows.Next() {
 			var (
-				id, zoteroKey, ingestStatus, createdAt string
+				id, zoteroKey, ingestStatus, createdAt       string
 				title, doi, arxivID, documentID, ingestError *string
 			)
 			if err := rows.Scan(&id, &zoteroKey, &title, &doi, &arxivID,
@@ -481,6 +487,25 @@ func zoteroUploadSqliteHandler(pool *pgxpool.Pool, sec *secrets.Manager, stg *st
 			return
 		}
 		_ = sqliteHdr // touched only to make the linter aware we considered the metadata
+
+		// Mirror the staged sqlite into the shared Garage blob store so the
+		// upload survives an ephemeral-staging-dir wipe (PH_STAGE_DIR is no
+		// longer the durable NFS volume). Best-effort + non-blocking: the
+		// zotero plugin reads the local copy on its next sync, so a missing
+		// blob store (BLOBSTORE_ENDPOINT unset) or a transient Put failure
+		// must not fail the upload. Key mirrors the local plugin layout.
+		if stg.HasBlobStore() {
+			if key, kerr := stg.PluginKey("zotero", runID, "zotero.sqlite"); kerr == nil {
+				if f, oerr := os.Open(sqlitePath); oerr == nil {
+					_, perr := stg.CommitReader(req.Context(), key, f)
+					_ = f.Close()
+					if perr != nil {
+						logger.WithError(perr).WithField("key", key).
+							Warn("mirror staged sqlite to blob store failed")
+					}
+				}
+			}
+		}
 
 		storageDir := ""
 		if tarF, _, err := req.FormFile("storage_tarball"); err == nil {
