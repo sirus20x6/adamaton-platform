@@ -6,6 +6,14 @@
 # builder stage to the workstation's native arch (amd64); GOARCH=$TARGETARCH
 # cross-compiles to whatever the runtime image will be.
 #
+# CGO note: the `reindex` queue pulls in r2g/chunking, which tokenizes via
+# ztok (the Zig tokenizer at the ./ztok submodule) through its cgo binding.
+# So this image is CGO_ENABLED=1 on debian/glibc — NOT the old alpine/musl
+# CGO=0 static build. The `ztoklib` stage cross-compiles libztok.a with Zig
+# and we static-link it into the worker; only libc is dynamic. Running on
+# glibc also sidesteps the go-fitz->purego musl trap that motivated keeping
+# the old worker cgo-free.
+#
 # Variants:
 #
 #   --build-arg GO_TAGS="skills reindex dispatch"          --target=runtime-light
@@ -16,32 +24,75 @@
 # compiled-in queues actually run — s6-overlay supervises one
 # process per queue.
 
+# --- ztoklib: cross-compile libztok.a with Zig --------------------------------
+# Pinned to BUILDPLATFORM (amd64); Zig cross-compiles to the runtime arch,
+# so we only need the amd64 Zig toolchain regardless of TARGETARCH.
+FROM --platform=$BUILDPLATFORM debian:trixie-slim AS ztoklib
+ARG TARGETARCH
+ARG ZIG_VERSION=0.16.0
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl xz-utils ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
+      | tar -xJ -C /opt \
+    && ln -s /opt/zig-x86_64-linux-${ZIG_VERSION}/zig /usr/local/bin/zig
+WORKDIR /src
+COPY ztok ./ztok
+RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) ZTARGET=x86_64-linux-gnu ;; \
+      arm64) ZTARGET=aarch64-linux-gnu ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    cd ztok && zig build -Doptimize=ReleaseFast -Dtarget="${ZTARGET}" -p /opt/ztok; \
+    rm -f /opt/ztok/lib/libztok.so*   # force the cgo link to pick libztok.a
+
 # --- builder ----------------------------------------------------------------
 FROM --platform=$BUILDPLATFORM golang:1.25-trixie AS build
 ARG TARGETARCH
 ARG GO_TAGS="skills reindex dispatch"
+# C toolchains: native gcc (amd64) + the arm64 cross-compiler so cgo can
+# link libztok.a for either runtime arch (mirrors knowledge/r2g/Dockerfile).
+RUN dpkg --add-architecture arm64 \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends build-essential crossbuild-essential-arm64 \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+COPY --from=ztoklib /opt/ztok /opt/ztok
 COPY go.work go.work.sum* ./
 COPY core ./core
+COPY ztok ./ztok
 COPY knowledge ./knowledge
 COPY deepresearch ./deepresearch
 COPY delegator ./delegator
 COPY evolve ./evolve
 COPY platform ./platform
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
-    go build -tags "${GO_TAGS}" -trimpath -ldflags='-s -w' \
+# CGO_ENABLED=1; build the ztok binding with -tags nopkgconfig and point cgo
+# at the cross-built libztok via CGO_CFLAGS/CGO_LDFLAGS. For arm64, drive the
+# cross C compiler (the Go compiler itself still runs natively on amd64).
+RUN set -eux; \
+    CC=gcc; \
+    if [ "${TARGETARCH}" = "arm64" ]; then CC=aarch64-linux-gnu-gcc; fi; \
+    CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH} CC="$CC" \
+    CGO_CFLAGS="-I/opt/ztok/include" \
+    CGO_LDFLAGS="-L/opt/ztok/lib" \
+    go build -tags "nopkgconfig ${GO_TAGS}" -trimpath -ldflags='-s -w' \
     -o /out/adamaton-worker ./platform/worker/cmd/adamaton-worker
 
 # --- s6-base ----------------------------------------------------------------
-# Common runtime base: alpine + s6-overlay + the binary + the s6 service
+# Common runtime base: debian + s6-overlay + the binary + the s6 service
 # layout. The per-variant runtime stages below add (or skip) python3.
-FROM alpine:3.21 AS s6-base
+# Base is debian:trixie-slim (glibc 2.40) — matches the builder's libc, and
+# the cgo binary is glibc-dynamic so it cannot run on alpine/musl.
+FROM debian:trixie-slim AS s6-base
 ARG TARGETARCH
 # Pinned s6-overlay version. Bump deliberately — newer releases have
 # changed behaviour around /var/run permissions in the past.
 ARG S6_OVERLAY_VERSION=3.2.0.2
-RUN apk --no-cache add ca-certificates tzdata xz
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata xz-utils wget \
+    && rm -rf /var/lib/apt/lists/*
 # Map docker's TARGETARCH (amd64|arm64) to s6's arch name.
 RUN set -eux; \
     case "${TARGETARCH:-amd64}" in \
@@ -88,9 +139,13 @@ FROM s6-base AS runtime-light
 
 # --- runtime-full: + evo (needs python3 for the kernel evaluator) -----------
 FROM s6-base AS runtime-full
-RUN apk --no-cache add python3 py3-pip
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
 
 # --- runtime-gpu: evo-only, intended for nodes with nvidia-container-runtime
 # CUDA libs are mounted from the host, not baked in here.
 FROM s6-base AS runtime-gpu
-RUN apk --no-cache add python3 py3-pip
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
