@@ -27,6 +27,11 @@ WORKDIR /src
 # is missing entries for deps pulled in transitively by other modules).
 COPY go.work go.work.sum* ./
 COPY core ./core
+# ztok is copied too: the dashboard imports ztok-go (github.com/sirus20x6/ztok-go)
+# transitively, whose go.work replace target is ./ztok/bindings/go — absent it,
+# the build fails reading /src/ztok/bindings/go/go.mod. (CGO_ENABLED=0 here, so
+# we only need the pure-Go binding source, not the compiled libztok.a.)
+COPY ztok ./ztok
 COPY knowledge ./knowledge
 COPY deepresearch ./deepresearch
 COPY delegator ./delegator
