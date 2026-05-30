@@ -492,6 +492,12 @@ func buildFleetHealth(pool evoPoolType, logger *logrus.Logger) (*health.Topology
 	}
 	fleet := health.NewFleetClient()
 	agg := health.NewAggregator(topo, fleet, probers, 15*time.Second, inferLocalHost())
+	// Wire the workflow-failure gauge off the same evo pool. When the pool
+	// is nil the source is left unset, so the snapshot simply omits the
+	// workflow gauge (additive — no behaviour change for pool-less deploys).
+	if pool != nil {
+		agg.SetWorkflowSource(&health.PgWorkflowFailureSource{Pool: pool})
+	}
 	logger.WithFields(logrus.Fields{
 		"path":         path,
 		"roles":        len(topo.Roles),
