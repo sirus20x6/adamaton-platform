@@ -76,9 +76,11 @@ func (s *APIServer) registerWorkerEndpoints(api *mux.Router) {
 	api.HandleFunc("/workers/{id}", s.getWorker).Methods("GET")
 }
 
-// workersSelectSQL is the shared column list + LATERAL joins. The
-// joins compute per-worker job counts so the UI can show "3 running /
-// 142 completed" without a second round-trip.
+// workersSelectSQL is the shared column list + a single pre-aggregated
+// join. The per-worker job counts (so the UI can show "3 running / 142
+// completed" without a second round-trip) come from ONE GROUP BY pass
+// over evo.jobs, rather than two correlated COUNT subqueries re-scanned
+// per worker row via LATERAL.
 //
 // The status column is no longer selected raw: crashed workers never
 // flip their stored status away from 'active' (no reaper exists), so we
@@ -111,17 +113,17 @@ SELECT w.id, w.identity, w.hostname, w.tailscale_ip, w.declared_queues,
        END AS status,
        w.last_heartbeat, w.first_seen, w.last_seen,
        w.cpu_pct, w.ram_used_gb, w.load_avg_1m,
-       COALESCE(a.cnt, 0) AS jobs_assigned,
-       COALESCE(c.cnt, 0) AS jobs_completed
+       COALESCE(j.jobs_assigned, 0) AS jobs_assigned,
+       COALESCE(j.jobs_completed, 0) AS jobs_completed
 FROM evo.workers w
-LEFT JOIN LATERAL (
-  SELECT COUNT(*) AS cnt FROM evo.jobs
-  WHERE assigned_worker = w.id AND status IN ('assigned', 'running')
-) a ON TRUE
-LEFT JOIN LATERAL (
-  SELECT COUNT(*) AS cnt FROM evo.jobs
-  WHERE assigned_worker = w.id AND status = 'succeeded'
-) c ON TRUE
+LEFT JOIN (
+  SELECT assigned_worker,
+         COUNT(*) FILTER (WHERE status IN ('assigned', 'running')) AS jobs_assigned,
+         COUNT(*) FILTER (WHERE status = 'succeeded')             AS jobs_completed
+  FROM evo.jobs
+  WHERE assigned_worker IS NOT NULL
+  GROUP BY assigned_worker
+) j ON j.assigned_worker = w.id
 `
 
 func (s *APIServer) listWorkers(w http.ResponseWriter, r *http.Request) {

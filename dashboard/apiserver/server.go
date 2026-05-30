@@ -642,11 +642,23 @@ func (s *APIServer) setupRoutes() {
 	// and dealing with CORS; the proxy handles both server-side.
 	s.registerResearchProxy(api)
 
+	// Always-public minimal liveness probe. Mounted at the TOP level
+	// (outside /api/v1) so it is reachable WITHOUT an API token — an
+	// orchestrator livenessProbe must keep working when api.token is set,
+	// and it must not leak internals. Returns a bare {"status":"ok"}.
+	// /healthz is the conventional alias. Registered before the SPA
+	// fallback so it always wins; /healthz is additionally excluded from
+	// the SPA fallback by isAPIPath's /health prefix check.
+	s.router.HandleFunc("/livez", s.liveness).Methods("GET")
+	s.router.HandleFunc("/healthz", s.liveness).Methods("GET")
+
 	// Health check (liveness vs. readiness):
-	//   /health        — cheap liveness probe; always 200 if the process is up.
-	//   /health/ready  — readiness probe; pings workflow store, Temporal, and
-	//                    the LLM endpoint and returns 503 with details if any
-	//                    upstream is unreachable.
+	//   /api/v1/health        — DETAILED, AUTH-GATED liveness (version, agent
+	//                            count). For the unauthenticated probe use
+	//                            /livez or /healthz above.
+	//   /api/v1/health/ready  — readiness probe; pings workflow store, Temporal,
+	//                            and the LLM endpoint and returns 503 with details
+	//                            if any upstream is unreachable.
 	api.HandleFunc("/health", s.healthCheck).Methods("GET")
 	api.HandleFunc("/health/ready", s.healthReady).Methods("GET")
 
@@ -975,11 +987,29 @@ func (s *APIServer) updateAgentConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// liveness is the minimal, ALWAYS-PUBLIC liveness probe. It is mounted at
+// the top level (/livez, /healthz) OUTSIDE the /api/v1 auth boundary so an
+// orchestrator's livenessProbe keeps working when api.token is set — an
+// auth-gated liveness endpoint would otherwise 401 the probe and trigger a
+// restart loop. Crucially it discloses NOTHING about internals: no version,
+// no agent count, no build info. Just "the process is accepting requests".
+// The detailed /api/v1/health (healthCheck) stays behind auth precisely so
+// those internals aren't readable by unauthenticated callers.
+func (s *APIServer) liveness(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ok"}` + "\n"))
+}
+
 // healthCheck is a cheap liveness probe. It does not contact upstreams —
 // kubernetes-style livenessProbe handlers should not depend on dependencies
 // because a transient downstream blip would otherwise mark the API server
 // itself as dead and cause a needless restart loop. For dependency checks,
 // see healthReady (mounted at /health/ready).
+//
+// Unlike liveness (above), this lives under /api/v1 and is auth-gated when a
+// token is configured; it MAY disclose coarse internals (version, agent
+// count) to authenticated callers. Public liveness lives at /livez|/healthz.
 func (s *APIServer) healthCheck(w http.ResponseWriter, r *http.Request) {
 	health := map[string]interface{}{
 		"status":    "healthy",
@@ -1108,6 +1138,10 @@ func (s *APIServer) Start(port string) error {
 	if err := s.validateListenAddress(addr); err != nil {
 		return err
 	}
+	// Loud startup guard for the empty-token posture. validateListenAddress
+	// already refused a non-loopback bind without a token; this surfaces the
+	// remaining loopback-dev case where authMiddleware fails open.
+	s.warnAuthPosture()
 	server := &http.Server{
 		Addr:              addr,
 		Handler:           handler,
@@ -1210,4 +1244,47 @@ func (s *APIServer) validateListenAddress(addr string) error {
 		return fmt.Errorf("API_TOKEN is required when binding API to %s", addr)
 	}
 	return nil
+}
+
+// allowNoAuthEnvKey is the explicit dev opt-in that acknowledges running
+// with no API token. validateListenAddress already hard-fails the
+// dangerous case (empty token bound to a non-loopback address); this flag
+// governs the remaining gap — an empty token on a loopback bind, where
+// authMiddleware fails OPEN and every writable route (/workflow/trigger,
+// /schedules, /kanban/…, /datasets, …) is reachable with no credential.
+const allowNoAuthEnvKey = "GOGENTS_APISERVER_ALLOW_NO_AUTH"
+
+// warnAuthPosture emits a loud, unmissable startup warning when the API
+// is about to serve writable routes with authentication disabled
+// (API token empty). validateListenAddress has already guaranteed the
+// bind is loopback-only by the time we get here, so this is never silent
+// exposure to the network — but a developer pointing a browser at
+// http://127.0.0.1:9123 still gets an unauthenticated mutation surface,
+// and a misconfigured deploy that dropped its token to "" should never
+// do so quietly.
+//
+// We deliberately do NOT fail closed on the loopback case: that would
+// break the long-standing "loopback + no token" dev workflow the
+// listen-address contract explicitly allows (see TestValidateListenAddress).
+// Instead we make the posture impossible to miss, and steer the operator
+// toward either setting api.token or explicitly acknowledging the dev
+// posture via GOGENTS_APISERVER_ALLOW_NO_AUTH=1 to silence the nag down
+// to a single line.
+func (s *APIServer) warnAuthPosture() {
+	if s.config.API.Token != "" {
+		return
+	}
+	if os.Getenv(allowNoAuthEnvKey) != "" {
+		s.logger.Warn("API auth DISABLED (no api.token); proceeding because " +
+			allowNoAuthEnvKey + " is set. Writable routes are unauthenticated — dev only.")
+		return
+	}
+	s.logger.Warn("================================================================")
+	s.logger.Warn("API AUTH IS DISABLED: api.token is empty.")
+	s.logger.Warn("Every writable route (workflow trigger, schedules, kanban,")
+	s.logger.Warn("datasets, memory, …) is reachable WITHOUT any credential.")
+	s.logger.Warn("Set api.token (API_TOKEN) for any shared/staging/prod deploy.")
+	s.logger.Warn("If this is intentional local dev, set " + allowNoAuthEnvKey + "=1")
+	s.logger.Warn("to acknowledge it and collapse this banner to one line.")
+	s.logger.Warn("================================================================")
 }
