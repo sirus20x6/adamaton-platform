@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -169,6 +170,150 @@ func mustParse(t *testing.T, body string) *Topology {
 		t.Fatalf("parse: %v", err)
 	}
 	return topo
+}
+
+// fakeWorkflowSource is an in-memory WorkflowFailureSource for the gauge
+// tests — it returns canned counts (or a canned error) without a DB.
+type fakeWorkflowSource struct {
+	counts WorkflowFailureCounts
+	err    error
+}
+
+func (f fakeWorkflowSource) WorkflowFailureCounts(context.Context) (WorkflowFailureCounts, error) {
+	return f.counts, f.err
+}
+
+func TestDeriveWorkflowHealth_statusLadder(t *testing.T) {
+	cases := []struct {
+		name     string
+		counts   WorkflowFailureCounts
+		wantStat Status
+		wantRate float64
+	}{
+		{
+			name:     "no failures -> ok",
+			counts:   WorkflowFailureCounts{FailedLastHour: 0, CompletedLastHour: 8},
+			wantStat: StatusOK,
+			wantRate: 0,
+		},
+		{
+			name:     "some failures below threshold -> degraded",
+			counts:   WorkflowFailureCounts{FailedLastHour: 3, CompletedLastHour: 1},
+			wantStat: StatusDegraded,
+			wantRate: 0.75,
+		},
+		{
+			name:     "at storm threshold -> offline",
+			counts:   WorkflowFailureCounts{FailedLastHour: FailureStormThreshold, CompletedLastHour: 0},
+			wantStat: StatusOffline,
+			wantRate: 1,
+		},
+		{
+			name:     "above storm threshold -> offline",
+			counts:   WorkflowFailureCounts{FailedLastHour: 25, CompletedLastHour: 5},
+			wantStat: StatusOffline,
+			wantRate: 25.0 / 30.0,
+		},
+		{
+			name:     "empty window -> ok, rate 0 (no divide-by-zero)",
+			counts:   WorkflowFailureCounts{},
+			wantStat: StatusOK,
+			wantRate: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wf := deriveWorkflowHealth(tc.counts)
+			if wf.Status != tc.wantStat {
+				t.Fatalf("status = %q, want %q", wf.Status, tc.wantStat)
+			}
+			if wf.FailedLastHour != tc.counts.FailedLastHour {
+				t.Fatalf("FailedLastHour = %d, want %d", wf.FailedLastHour, tc.counts.FailedLastHour)
+			}
+			if diff := wf.FailureRate1h - tc.wantRate; diff > 1e-9 || diff < -1e-9 {
+				t.Fatalf("FailureRate1h = %v, want %v", wf.FailureRate1h, tc.wantRate)
+			}
+			if wf.Detail == "" {
+				t.Fatal("Detail should never be empty")
+			}
+		})
+	}
+}
+
+// TestAggregator_workflowGauge_inSnapshot proves the gauge flows through a
+// refresh into the published snapshot when a source is wired, and stays
+// nil when it isn't.
+func TestAggregator_workflowGauge_inSnapshot(t *testing.T) {
+	topo := mustParse(t, `
+roles:
+  r2g:
+    kind: http
+    probe: { port: 7373, path: /health, timeout: 100ms }
+    min_healthy: 0
+    optional: true
+capabilities:
+  rag:
+    label: RAG
+    roles: [r2g]
+`)
+
+	// No source wired -> snapshot omits the gauge.
+	bare := NewAggregator(topo, NewFleetClient(), Probers{}, time.Hour, "testhost")
+	bare.Refresh(context.Background())
+	if got := bare.Get().Workflows; got != nil {
+		t.Fatalf("expected nil Workflows without a source, got %+v", got)
+	}
+
+	// Source wired with a failure storm -> gauge present + offline.
+	a := NewAggregator(topo, NewFleetClient(), Probers{}, time.Hour, "testhost")
+	a.SetWorkflowSource(fakeWorkflowSource{counts: WorkflowFailureCounts{
+		FailedLastHour: 12, CompletedLastHour: 3, RunningNow: 2, FailedLast24h: 40,
+	}})
+	a.Refresh(context.Background())
+	wf := a.Get().Workflows
+	if wf == nil {
+		t.Fatal("expected Workflows gauge in snapshot")
+	}
+	if wf.Status != StatusOffline {
+		t.Fatalf("storm should be offline, got %q", wf.Status)
+	}
+	if wf.FailedLastHour != 12 || wf.RunningNow != 2 || wf.FailedLast24h != 40 {
+		t.Fatalf("counts not propagated: %+v", wf)
+	}
+}
+
+// TestAggregator_workflowGauge_sourceError keeps the snapshot publishing
+// (with an "unknown" advisory gauge) when the source query fails.
+func TestAggregator_workflowGauge_sourceError(t *testing.T) {
+	topo := mustParse(t, `
+roles:
+  r2g:
+    kind: http
+    probe: { port: 7373, path: /health, timeout: 100ms }
+    min_healthy: 0
+    optional: true
+capabilities:
+  rag:
+    label: RAG
+    roles: [r2g]
+`)
+	a := NewAggregator(topo, NewFleetClient(), Probers{}, time.Hour, "testhost")
+	a.SetWorkflowSource(fakeWorkflowSource{err: errors.New("boom: relation does not exist")})
+	a.Refresh(context.Background())
+	wf := a.Get().Workflows
+	if wf == nil {
+		t.Fatal("expected an advisory gauge even on source error")
+	}
+	if wf.Status != StatusUnknown {
+		t.Fatalf("source error should yield unknown, got %q", wf.Status)
+	}
+	if wf.Error == "" {
+		t.Fatal("source error should be surfaced in Error")
+	}
+	// The rest of the snapshot must still be present.
+	if len(a.Get().Roles) == 0 {
+		t.Fatal("roles rollup should still publish alongside a failed workflow gauge")
+	}
 }
 
 func TestDiscoverInstances_synthesisCoversInfraRoles(t *testing.T) {

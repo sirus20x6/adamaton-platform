@@ -34,6 +34,7 @@ func (s *APIServer) registerHealthEndpoints(api *mux.Router) {
 	api.HandleFunc("/health/fleet", s.getFleetHealth).Methods("GET")
 	api.HandleFunc("/health/roles", s.getFleetRoles).Methods("GET")
 	api.HandleFunc("/health/instances", s.getFleetInstances).Methods("GET")
+	api.HandleFunc("/health/workflows", s.getFleetWorkflows).Methods("GET")
 	api.HandleFunc("/health/topology", s.getFleetTopology).Methods("GET")
 	api.HandleFunc("/health/cache", s.refreshFleetHealth).Methods("DELETE")
 }
@@ -64,6 +65,36 @@ func (s *APIServer) getFleetHealth(w http.ResponseWriter, r *http.Request) {
 			"generated_at": snap.GeneratedAt,
 			"stale_for":    snap.StaleFor,
 			"capabilities": snap.Capabilities,
+			// workflows is the failure gauge; omitted (nil) when no
+			// workflow store is wired. Included in the compact rollup so
+			// the SPA's top-level health pill can fold a "workflow
+			// failure storm" into the same view as capability health.
+			"workflows": snap.Workflows,
+		},
+		Success: true,
+	})
+}
+
+// getFleetWorkflows returns just the workflow-failure gauge —
+// workflows_failed_last_hour and the alert-friendly counters operators
+// use to spot a "workflow failure storm". 503s when topology isn't
+// loaded; returns the gauge with a 200 even when no workflow source is
+// wired (workflows == null) so the SPA can distinguish "health system
+// down" from "no workflow telemetry".
+func (s *APIServer) getFleetWorkflows(w http.ResponseWriter, r *http.Request) {
+	if s.fleetHealth == nil {
+		s.sendJSON(w, http.StatusServiceUnavailable, APIResponse{
+			Error:   "fleet health unavailable: topology not loaded",
+			Success: false,
+		})
+		return
+	}
+	snap := s.fleetHealth.Get()
+	s.sendJSON(w, http.StatusOK, APIResponse{
+		Data: map[string]any{
+			"generated_at": snap.GeneratedAt,
+			"stale_for":    snap.StaleFor,
+			"workflows":    snap.Workflows,
 		},
 		Success: true,
 	})
