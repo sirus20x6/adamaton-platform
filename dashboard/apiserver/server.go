@@ -422,6 +422,19 @@ func NewAPIServer(config *types.Config, logger *logrus.Logger) (*APIServer, erro
 	}
 
 	server.setupRoutes()
+
+	// Persistent terminals: reconcile the evo.terminal_sessions table against
+	// `tmux ls` once at boot (live rows whose tmux session vanished -> dead),
+	// then start the ~60s reaper that kills orphan "adam-" sessions and keeps
+	// the table honest. Both no-op when PTY_BACKEND=none or evoPool is nil.
+	// The reaper runs on a background context for the lifetime of the process
+	// — process exit takes the goroutine with it (same rationale as the
+	// fleet-health refresh loop above).
+	reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	server.ReconcileTerminals(reconcileCtx)
+	reconcileCancel()
+	server.StartTerminalReaper(context.Background())
+
 	return server, nil
 }
 
@@ -596,6 +609,18 @@ func (s *APIServer) setupRoutes() {
 	// per-project Kanban land on top in later phases). Same evoPool, same
 	// 503-when-nil behaviour. See docs/PROJECTS_KANBAN.md.
 	s.registerProjectsEndpoints(api)
+
+	// Persistent terminals — tmux-backed shells per project, with a
+	// websocket bridge to `tmux attach`. Gated behind PTY_BACKEND (tmux|
+	// none; default tmux); every handler 503s when the backend is "none"
+	// or the evoPool is nil. The boot reconciler + reaper are started in
+	// NewAPIServer. See docs/PROJECTS_KANBAN.md.
+	s.registerTerminalEndpoints(api)
+
+	// Per-project Kanban boards — CRUD over evo.kanban_* with an atomic
+	// card-claim path the delegator MCP server drives over HTTP. Same
+	// evoPool, same 503-when-nil behaviour. See docs/PROJECTS_KANBAN.md.
+	s.registerKanbanEndpoints(api)
 
 	// Cross-subsystem status fan-out for the unified landing page.
 	api.HandleFunc("/system/status", s.handleSystemStatus).Methods("GET")
