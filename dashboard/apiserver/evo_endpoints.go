@@ -4,7 +4,6 @@
 // already ported); the rest will be deleted. Do not extend this file --
 // new dashboard work belongs in the deepresearch frontend / platform
 // backend, not here.
-//
 package apiserver
 
 import (
@@ -90,11 +89,11 @@ func (s *APIServer) handleEvoRuns(w http.ResponseWriter, r *http.Request) {
 		       p.best_speedup
 		FROM evo.runs r
 		LEFT JOIN evo.tasks t ON t.id = r.task_id
-		LEFT JOIN LATERAL (
-			SELECT count(*) AS cnt, max(speedup) AS best_speedup
+		LEFT JOIN (
+			SELECT run_id, count(*) AS cnt, max(speedup) AS best_speedup
 			FROM evo.programs
-			WHERE run_id = r.id
-		) p ON TRUE
+			GROUP BY run_id
+		) p ON p.run_id = r.id
 		ORDER BY r.started_at DESC
 		LIMIT $1 OFFSET $2
 	`
