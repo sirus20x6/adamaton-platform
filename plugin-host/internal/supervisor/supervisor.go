@@ -33,6 +33,7 @@ import (
 
 	pluginv1 "github.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/manifest"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/phmetrics"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/secrets"
 )
 
@@ -86,6 +87,13 @@ func New(opts Options) *Supervisor {
 	return &Supervisor{opts: opts, insts: map[string]*instance{}}
 }
 
+// setActiveLocked syncs the active-plugins gauge to the current instance
+// count. Call it after every mutation of s.insts while holding s.mu so the
+// gauge can never drift from len(insts).
+func (s *Supervisor) setActiveLocked() {
+	phmetrics.ActivePlugins.Set(float64(len(s.insts)))
+}
+
 // Start runs the idle reaper loop until ctx is cancelled.
 func (s *Supervisor) Start(ctx context.Context) error {
 	t := time.NewTicker(10 * time.Second)
@@ -129,15 +137,19 @@ func (s *Supervisor) EnsureRunning(ctx context.Context, pluginID string) (plugin
 
 	// Restart-budget check (per-plugin per-minute).
 	if !s.allowSpawnLocked(pluginID, m) {
+		phmetrics.SpawnFailures.WithLabelValues(pluginID, "budget").Inc()
 		return nil, m, fmt.Errorf("supervisor: %s exceeded restart budget %d/min",
 			pluginID, m.Supervisor.MaxRestartPerMin)
 	}
 
 	inst, err := s.spawnLocked(ctx, m)
 	if err != nil {
+		// spawnLocked stamps the specific reason on the failure counter; the
+		// error is already classified there.
 		return nil, m, fmt.Errorf("spawn %s: %w", pluginID, err)
 	}
 	s.insts[pluginID] = inst
+	s.setActiveLocked()
 	return inst.client, m, nil
 }
 
@@ -166,6 +178,7 @@ func (s *Supervisor) allowSpawnLocked(pluginID string, m *manifest.Manifest) boo
 // holds s.mu.
 func (s *Supervisor) spawnLocked(ctx context.Context, m *manifest.Manifest) (*instance, error) {
 	if len(m.Command) == 0 {
+		phmetrics.SpawnFailures.WithLabelValues(m.ID, "config").Inc()
 		return nil, errors.New("manifest.command is empty")
 	}
 
@@ -184,6 +197,7 @@ func (s *Supervisor) spawnLocked(ctx context.Context, m *manifest.Manifest) (*in
 	// own startup (e.g. to GetConfig before serving its plugin socket).
 	hostLis, err := net.Listen("unix", hostSock)
 	if err != nil {
+		phmetrics.SpawnFailures.WithLabelValues(m.ID, "listen").Inc()
 		return nil, fmt.Errorf("listen host sock: %w", err)
 	}
 	hostGRPC := grpc.NewServer(
@@ -214,6 +228,7 @@ func (s *Supervisor) spawnLocked(ctx context.Context, m *manifest.Manifest) (*in
 		hostGRPC.Stop()
 		_ = hostLis.Close()
 		_ = os.Remove(hostSock)
+		phmetrics.SpawnFailures.WithLabelValues(m.ID, "exec").Inc()
 		return nil, fmt.Errorf("exec: %w", err)
 	}
 
@@ -225,6 +240,7 @@ func (s *Supervisor) spawnLocked(ctx context.Context, m *manifest.Manifest) (*in
 		_ = cmd.Process.Kill()
 		hostGRPC.Stop()
 		_ = os.Remove(hostSock)
+		phmetrics.SpawnFailures.WithLabelValues(m.ID, "socket_timeout").Inc()
 		return nil, fmt.Errorf("plugin socket not ready: %w", err)
 	}
 
@@ -236,6 +252,7 @@ func (s *Supervisor) spawnLocked(ctx context.Context, m *manifest.Manifest) (*in
 		_ = cmd.Process.Kill()
 		hostGRPC.Stop()
 		_ = os.Remove(hostSock)
+		phmetrics.SpawnFailures.WithLabelValues(m.ID, "dial").Inc()
 		return nil, fmt.Errorf("dial plugin: %w", err)
 	}
 	client := pluginv1.NewPluginClient(conn)
@@ -254,6 +271,7 @@ func (s *Supervisor) spawnLocked(ctx context.Context, m *manifest.Manifest) (*in
 		_ = cmd.Process.Kill()
 		hostGRPC.Stop()
 		_ = os.Remove(hostSock)
+		phmetrics.SpawnFailures.WithLabelValues(m.ID, "hello").Inc()
 		return nil, fmt.Errorf("hello: %w", err)
 	}
 
@@ -334,6 +352,7 @@ func (s *Supervisor) teardownLocked(id string, inst *instance) {
 	_ = os.Remove(inst.hostSock)
 
 	delete(s.insts, id)
+	s.setActiveLocked()
 }
 
 // reapIdle walks instances and tears down any whose lastUsed exceeded

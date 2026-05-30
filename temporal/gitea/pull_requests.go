@@ -39,6 +39,24 @@ var GiteaUnknown409Body = promauto.With(prometheus.DefaultRegisterer).NewCounter
 	[]string{"method", "endpoint"},
 )
 
+// GiteaRateLimited counts responses from the Gitea API that came back 429 Too
+// Many Requests — i.e. the review/merge token's rate-limit budget was actually
+// exhausted, not just running low (checkRateLimit already logs the
+// running-low case from the X-RateLimit-Remaining header). Operators should
+// alert on any non-zero rate here: a 429 means a review or merge call was
+// rejected outright and the workflow either retried or failed.
+//
+// Same promauto.With(DefaultRegisterer) pattern as GiteaUnknown409Body so a
+// test binary that links this package twice doesn't panic on a duplicate
+// registration. The gitea-webhook server exposes it via metrics.Handler() on
+// /metrics (the default registerer is what promhttp.Handler() scrapes).
+var GiteaRateLimited = promauto.With(prometheus.DefaultRegisterer).NewCounter(
+	prometheus.CounterOpts{
+		Name: "gogents_gitea_rate_limited_total",
+		Help: "Total Gitea API responses with HTTP 429 Too Many Requests.",
+	},
+)
+
 // prClosedKeywords is the closed set of body fragments that Gitea (and the
 // forks we've seen in the wild) use to signal "PR is not in an open state".
 // The list is intentionally narrow — false positives here would let a workflow

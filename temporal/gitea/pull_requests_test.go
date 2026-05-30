@@ -532,3 +532,44 @@ func TestErrPRClosed_ExportedSentinel(t *testing.T) {
 	// Light import-keepalive — strings is used elsewhere in this file.
 	require.True(t, strings.HasPrefix("pull request is closed", "pull"))
 }
+
+// TestCheckRateLimit_429IncrementsCounter confirms that a 429 response from
+// Gitea bumps GiteaRateLimited. checkRateLimit fires on every response path,
+// so we exercise it through GetPullRequest (a GET via makeRequest). The
+// counter is a process-global default-registerer metric, so we read the
+// delta around the call rather than asserting an absolute value.
+func TestCheckRateLimit_429IncrementsCounter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Limit", "1000")
+		w.Header().Set("X-RateLimit-Reset", "1700000000")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"message":"rate limited"}`))
+	}))
+	defer srv.Close()
+
+	before := testutil.ToFloat64(GiteaRateLimited)
+	c := newTestClient(t, srv.URL)
+	// GET goes through makeRequest -> checkRateLimit. The non-2xx makes the
+	// call return an error, which is expected and irrelevant to the metric.
+	_, err := c.GetPullRequest(context.Background(), "owner", "repo", 7)
+	require.Error(t, err)
+	after := testutil.ToFloat64(GiteaRateLimited)
+	require.Equal(t, 1.0, after-before, "a 429 response must increment GiteaRateLimited exactly once")
+}
+
+// TestCheckRateLimit_Non429DoesNotIncrement guards against the counter firing
+// on ordinary success responses.
+func TestCheckRateLimit_Non429DoesNotIncrement(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"number":7}`))
+	}))
+	defer srv.Close()
+
+	before := testutil.ToFloat64(GiteaRateLimited)
+	c := newTestClient(t, srv.URL)
+	_, _ = c.GetPullRequest(context.Background(), "owner", "repo", 7)
+	after := testutil.ToFloat64(GiteaRateLimited)
+	require.Equal(t, 0.0, after-before, "a 200 response must not increment GiteaRateLimited")
+}
