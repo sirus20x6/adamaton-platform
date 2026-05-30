@@ -126,6 +126,7 @@ func run() error {
 	mux.HandleFunc("/scale", s.requireAuth(s.handleScale))
 	mux.HandleFunc("/provision", s.requireAuth(s.handleProvision))
 	mux.HandleFunc("/catalog", s.requireAuth(s.handleCatalog))
+	s.registerProjectEndpoints(mux)
 
 	srv := &http.Server{
 		Addr:              bind,
@@ -155,17 +156,24 @@ func loadManifest(path string) (manifest, error) {
 }
 
 // requireAuth wraps a handler with bearer-token enforcement.
-// Constant-time compare so the response time doesn't leak token bytes.
 func (s *server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
-	expected := "Bearer " + s.token
 	return func(w http.ResponseWriter, r *http.Request) {
-		got := r.Header.Get("Authorization")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+		if !s.authOK(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		h(w, r)
 	}
+}
+
+// authOK reports whether the request carries the shared bearer token. Split out
+// of requireAuth so the websocket project route — which must check the token
+// before upgrading, since it can't 401 afterwards — can reuse the same compare.
+// Constant-time compare so the response time doesn't leak token bytes.
+func (s *server) authOK(r *http.Request) bool {
+	expected := "Bearer " + s.token
+	got := r.Header.Get("Authorization")
+	return subtle.ConstantTimeCompare([]byte(got), []byte(expected)) == 1
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {

@@ -12,28 +12,30 @@ package apiserver
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/jackc/pgx/v5"
+	"github.com/sirus20x6/adamaton-core/projectfs"
 )
 
-// Project is the wire shape for /api/v1/projects. Mirrors evo.projects.
+// Project is the wire shape for /api/v1/projects. Mirrors evo.projects. Host
+// names the machine the folder lives on ("" = the local host, for back-compat
+// with pre-migration-0018 rows).
 type Project struct {
 	ID             string     `json:"id"`
 	Path           string     `json:"path"`
 	DisplayName    string     `json:"display_name"`
 	Type           string     `json:"type"` // git-repo|worktree|submodule|folder
+	Host           string     `json:"host"`
 	GitRemote      *string    `json:"git_remote,omitempty"`
 	ParentID       *string    `json:"parent_id,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
@@ -42,34 +44,34 @@ type Project struct {
 
 // ProjectCreateRequest is the body for POST /api/v1/projects. Only Path is
 // required; DisplayName defaults to the folder basename and Type/GitRemote are
-// auto-detected from the filesystem. ParentID is optional (nesting).
+// auto-detected from the filesystem. ParentID is optional (nesting). Host
+// selects the machine the folder lives on; empty means the local host.
 type ProjectCreateRequest struct {
 	Path        string `json:"path"`
 	DisplayName string `json:"display_name"`
 	ParentID    string `json:"parent_id"`
+	Host        string `json:"host"`
 }
 
 func (s *APIServer) registerProjectsEndpoints(api *mux.Router) {
 	api.HandleFunc("/projects", s.listProjects).Methods("GET")
 	api.HandleFunc("/projects", s.createProject).Methods("POST")
+	api.HandleFunc("/projects/hosts", s.listProjectHosts).Methods("GET")
 	api.HandleFunc("/projects/{id}", s.getProject).Methods("GET")
 	api.HandleFunc("/projects/{id}", s.deleteProject).Methods("DELETE")
 	api.HandleFunc("/projects/{id}/tree", s.getProjectTree).Methods("GET")
 	api.HandleFunc("/projects/{id}/file", s.getProjectFile).Methods("GET")
 }
 
-// FileNode is the wire shape for /api/v1/projects/{id}/tree. Path is relative
-// to the project root ("" means the root itself); the tree endpoint returns
-// the direct children of the requested path only (lazy, one level deep).
-type FileNode struct {
-	Name  string `json:"name"`
-	Path  string `json:"path"`
-	IsDir bool   `json:"is_dir"`
-	Size  int64  `json:"size"`
+// listProjectHosts returns the hosts a project can be registered on: the local
+// host plus every host with a configured deploy-agent URL (deduped, local
+// first). The Projects UI uses this to populate the host picker on create.
+func (s *APIServer) listProjectHosts(w http.ResponseWriter, r *http.Request) {
+	writeEvoJSON(w, registerableHosts())
 }
 
 const projectsListSQL = `
-SELECT id, path, display_name, type, git_remote, parent_id, created_at, last_accessed_at
+SELECT id, path, display_name, type, host, git_remote, parent_id, created_at, last_accessed_at
 FROM evo.projects
 ORDER BY created_at DESC
 LIMIT 500`
@@ -92,7 +94,7 @@ func (s *APIServer) listProjects(w http.ResponseWriter, r *http.Request) {
 	out := make([]Project, 0)
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.Path, &p.DisplayName, &p.Type,
+		if err := rows.Scan(&p.ID, &p.Path, &p.DisplayName, &p.Type, &p.Host,
 			&p.GitRemote, &p.ParentID, &p.CreatedAt, &p.LastAccessedAt); err != nil {
 			writeEvoErr(w, http.StatusInternalServerError, "scan: "+err.Error())
 			return
@@ -107,7 +109,7 @@ func (s *APIServer) listProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 const projectGetSQL = `
-SELECT id, path, display_name, type, git_remote, parent_id, created_at, last_accessed_at
+SELECT id, path, display_name, type, host, git_remote, parent_id, created_at, last_accessed_at
 FROM evo.projects
 WHERE id = $1`
 
@@ -122,7 +124,7 @@ func (s *APIServer) getProject(w http.ResponseWriter, r *http.Request) {
 
 	var p Project
 	if err := s.evoPool.QueryRow(ctx, projectGetSQL, id).Scan(
-		&p.ID, &p.Path, &p.DisplayName, &p.Type,
+		&p.ID, &p.Path, &p.DisplayName, &p.Type, &p.Host,
 		&p.GitRemote, &p.ParentID, &p.CreatedAt, &p.LastAccessedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -135,194 +137,101 @@ func (s *APIServer) getProject(w http.ResponseWriter, r *http.Request) {
 	writeEvoJSON(w, p)
 }
 
-// maxFileBytes caps the file endpoint: refuse to serve anything bigger so we
-// never buffer a huge blob into the response.
-const maxFileBytes = 1 << 20 // 1 MiB
+// projectLoc fetches the on-disk root and host for a project; nil pool and
+// missing rows are handled by the caller via projectPathHost.
+const projectLocSQL = `SELECT path, host FROM evo.projects WHERE id = $1`
 
-// projectRootSQL fetches just the on-disk root for a project; nil pool and
-// missing rows are handled by the caller.
-const projectRootSQL = `SELECT path FROM evo.projects WHERE id = $1`
-
-// resolveInProject canonicalizes a caller-supplied relative path against a
-// project root and guarantees the result stays inside that root. It returns
-// the absolute, symlink-resolved path. The guard is layered: reject ".."
-// segments up front, join+Clean against the root, then EvalSymlinks and
-// re-check the resolved path is still under the (also symlink-resolved) root —
-// so a symlink inside the tree can't be used to escape.
-func resolveInProject(root, rel string) (string, error) {
-	root = filepath.Clean(root)
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
-	}
-
-	rel = strings.TrimSpace(rel)
-	// Treat a leading slash as relative-to-root, not absolute.
-	rel = strings.TrimPrefix(rel, "/")
-	clean := filepath.Clean("/" + rel) // collapses ".." that would escape "/"
-	clean = strings.TrimPrefix(clean, "/")
-
-	abs := filepath.Join(root, clean)
-	abs = filepath.Clean(abs)
-
-	// Re-resolve symlinks on the target when it exists; a non-existent path
-	// (EvalSymlinks errors) is fine to keep as-is for the under-root check —
-	// os.ReadDir/os.Open will then surface the not-found.
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = resolved
-	}
-
-	if abs != root && !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
-		return "", errors.New("path escapes project root")
-	}
-	return abs, nil
-}
-
-// relFromRoot renders an absolute path back as a forward-slash relative path
-// from the project root ("" for the root itself), for the FileNode wire shape.
-func relFromRoot(root, abs string) string {
-	rel, err := filepath.Rel(root, abs)
-	if err != nil || rel == "." {
-		return ""
-	}
-	return filepath.ToSlash(rel)
-}
-
-// projectRoot loads and symlink-resolves a project's on-disk path, returning
-// false (after writing the response) when the pool is nil or the project is
-// missing.
-func (s *APIServer) projectRoot(w http.ResponseWriter, r *http.Request, id string) (string, bool) {
+// projectPathHost loads a project's on-disk path and host, returning false
+// (after writing the response) when the pool is nil or the project is missing.
+// The path is returned as stored (already canonicalised at create time);
+// projectfs re-resolves symlinks for the local case, and the agent does the
+// same for the remote case.
+func (s *APIServer) projectPathHost(w http.ResponseWriter, r *http.Request, id string) (path, host string, ok bool) {
 	if s.evoPool == nil {
 		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
-		return "", false
+		return "", "", false
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	var root string
-	if err := s.evoPool.QueryRow(ctx, projectRootSQL, id).Scan(&root); err != nil {
+	if err := s.evoPool.QueryRow(ctx, projectLocSQL, id).Scan(&path, &host); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeEvoErr(w, http.StatusNotFound, "project not found")
-			return "", false
+			return "", "", false
 		}
 		writeEvoErr(w, http.StatusInternalServerError, "query: "+err.Error())
-		return "", false
+		return "", "", false
 	}
-	root = filepath.Clean(root)
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
-	}
-	return root, true
+	return path, host, true
 }
 
 // getProjectTree lists the direct children of ?path (relative to the project
 // root, "" = root) one level deep, dirs first then files, each sorted by name.
+// When the project lives on a remote host the request is reverse-proxied to
+// that host's deploy-agent /project/tree; locally it runs projectfs.BuildTree.
 func (s *APIServer) getProjectTree(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
-	root, ok := s.projectRoot(w, r, id)
+	root, host, ok := s.projectPathHost(w, r, id)
 	if !ok {
 		return
 	}
-
 	rel := r.URL.Query().Get("path")
-	abs, err := resolveInProject(root, rel)
-	if err != nil {
-		writeEvoErr(w, http.StatusBadRequest, err.Error())
+
+	if !isLocalHost(host) {
+		s.proxyAgentGET(w, r, host, "/project/tree",
+			"root="+urlQueryEscape(root)+"&path="+urlQueryEscape(rel))
 		return
 	}
 
-	entries, err := os.ReadDir(abs)
+	out, err := projectfs.BuildTree(root, rel)
 	if err != nil {
-		if os.IsNotExist(err) {
-			writeEvoErr(w, http.StatusNotFound, "path not found")
-			return
-		}
-		writeEvoErr(w, http.StatusInternalServerError, "readdir: "+err.Error())
+		writeProjectfsErr(w, err)
 		return
 	}
-
-	out := make([]FileNode, 0, len(entries))
-	for _, e := range entries {
-		child := filepath.Join(abs, e.Name())
-		var size int64
-		if info, ierr := e.Info(); ierr == nil {
-			size = info.Size()
-		}
-		out = append(out, FileNode{
-			Name:  e.Name(),
-			Path:  relFromRoot(root, child),
-			IsDir: e.IsDir(),
-			Size:  size,
-		})
-	}
-	// Directories first, then files; each group alphabetical by name.
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].IsDir != out[j].IsDir {
-			return out[i].IsDir
-		}
-		return out[i].Name < out[j].Name
-	})
 	writeEvoJSON(w, out)
 }
 
 // getProjectFile returns the contents of ?path within the project. Files over
-// maxFileBytes get a 413; binary content (per http.DetectContentType) is
-// base64-encoded, otherwise it is returned as utf8.
+// projectfs.MaxFileBytes get a 413; binary content (per http.DetectContentType)
+// is base64-encoded, otherwise utf8. Remote projects are reverse-proxied to the
+// host's deploy-agent /project/file; locally it runs projectfs.ReadFileContents.
 func (s *APIServer) getProjectFile(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
-	root, ok := s.projectRoot(w, r, id)
+	root, host, ok := s.projectPathHost(w, r, id)
 	if !ok {
 		return
 	}
-
 	rel := r.URL.Query().Get("path")
-	abs, err := resolveInProject(root, rel)
+
+	if !isLocalHost(host) {
+		s.proxyAgentGET(w, r, host, "/project/file",
+			"root="+urlQueryEscape(root)+"&path="+urlQueryEscape(rel))
+		return
+	}
+
+	fc, err := projectfs.ReadFileContents(root, rel)
 	if err != nil {
+		writeProjectfsErr(w, err)
+		return
+	}
+	writeEvoJSON(w, fc)
+}
+
+// writeProjectfsErr maps a projectfs error to the right HTTP status: ErrEscape
+// -> 400, ErrTooLarge -> 413, ErrNotDir -> 400, os not-found -> 404, else 500.
+func writeProjectfsErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, projectfs.ErrEscape):
 		writeEvoErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	info, err := os.Stat(abs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			writeEvoErr(w, http.StatusNotFound, "file not found")
-			return
-		}
-		writeEvoErr(w, http.StatusInternalServerError, "stat: "+err.Error())
-		return
-	}
-	if info.IsDir() {
-		writeEvoErr(w, http.StatusBadRequest, "path is a directory")
-		return
-	}
-	if info.Size() > maxFileBytes {
+	case errors.Is(err, projectfs.ErrTooLarge):
 		writeEvoErr(w, http.StatusRequestEntityTooLarge, "file exceeds 1MB limit")
-		return
+	case errors.Is(err, projectfs.ErrNotDir):
+		writeEvoErr(w, http.StatusBadRequest, err.Error())
+	case os.IsNotExist(err):
+		writeEvoErr(w, http.StatusNotFound, "path not found")
+	default:
+		writeEvoErr(w, http.StatusInternalServerError, err.Error())
 	}
-
-	data, err := os.ReadFile(abs)
-	if err != nil {
-		writeEvoErr(w, http.StatusInternalServerError, "read: "+err.Error())
-		return
-	}
-
-	// http.DetectContentType sniffs the first 512 bytes; anything that isn't
-	// a text/* type (or that contains a NUL) is treated as binary.
-	ctype := http.DetectContentType(data)
-	isText := strings.HasPrefix(ctype, "text/") || strings.HasPrefix(ctype, "application/json") || strings.HasPrefix(ctype, "application/xml")
-
-	resp := map[string]interface{}{
-		"path":      relFromRoot(root, abs),
-		"size":      info.Size(),
-		"truncated": false,
-	}
-	if isText {
-		resp["contents"] = string(data)
-		resp["encoding"] = "utf8"
-	} else {
-		resp["contents"] = base64.StdEncoding.EncodeToString(data)
-		resp["encoding"] = "base64"
-	}
-	writeEvoJSON(w, resp)
 }
 
 func (s *APIServer) createProject(w http.ResponseWriter, r *http.Request) {
@@ -344,40 +253,52 @@ func (s *APIServer) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Canonicalize the path and verify it's an existing directory on the
-	// host. We register absolute, symlink-resolved paths so the UNIQUE
-	// constraint dedupes the same folder reached by different spellings.
-	abs, err := filepath.Abs(req.Path)
-	if err != nil {
-		writeEvoErr(w, http.StatusBadRequest, "bad path: "+err.Error())
-		return
-	}
-	if resolved, rerr := filepath.EvalSymlinks(abs); rerr == nil {
-		abs = resolved
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			writeEvoErr(w, http.StatusBadRequest, "path does not exist: "+abs)
+	// Resolve the target host. An empty host (or one that names this machine)
+	// is local: we validate the directory in-process via projectfs. A remote
+	// host is validated by its deploy-agent, which runs the same projectfs
+	// primitives on its own filesystem. host is stored "" for local so
+	// pre-0018 rows and freshly-local rows share a representation.
+	targetHost := strings.TrimSpace(req.Host)
+	var (
+		abs       string
+		projType  string
+		gitRemote *string
+		storeHost string
+	)
+	if isLocalHost(targetHost) {
+		canon, ptype, remote, verr := projectfs.ValidateDir(req.Path)
+		if verr != nil {
+			if os.IsNotExist(verr) {
+				writeEvoErr(w, http.StatusBadRequest, "path does not exist: "+req.Path)
+				return
+			}
+			writeEvoErr(w, http.StatusBadRequest, "invalid path: "+verr.Error())
 			return
 		}
-		writeEvoErr(w, http.StatusBadRequest, "cannot stat path: "+err.Error())
-		return
-	}
-	if !info.IsDir() {
-		writeEvoErr(w, http.StatusBadRequest, "path is not a directory: "+abs)
-		return
+		abs, projType = canon, ptype
+		if remote != "" {
+			gitRemote = &remote
+		}
+		storeHost = "" // local is always stored as the empty host.
+	} else {
+		vctx, vcancel := context.WithTimeout(r.Context(), 12*time.Second)
+		res, verr := validateOnAgent(vctx, targetHost, req.Path)
+		vcancel()
+		if verr != nil {
+			writeEvoErr(w, http.StatusBadRequest,
+				"validate on host "+targetHost+": "+verr.Error())
+			return
+		}
+		abs, projType = res.Abs, res.Type
+		if res.GitRemote != "" {
+			remote := res.GitRemote
+			gitRemote = &remote
+		}
+		storeHost = targetHost
 	}
 
 	if req.DisplayName == "" {
-		req.DisplayName = filepath.Base(abs)
-	}
-	projType := detectProjectType(abs)
-	var gitRemote *string
-	if projType != "folder" {
-		if remote := gitRemoteURL(abs); remote != "" {
-			gitRemote = &remote
-		}
+		req.DisplayName = filepathBase(abs)
 	}
 
 	// Validate parent_id (when supplied) exists, so we never insert a
@@ -409,15 +330,16 @@ func (s *APIServer) createProject(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	const insertSQL = `
-INSERT INTO evo.projects (id, path, display_name, type, git_remote, parent_id)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, path, display_name, type, git_remote, parent_id, created_at, last_accessed_at`
+INSERT INTO evo.projects (id, path, display_name, type, host, git_remote, parent_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, path, display_name, type, host, git_remote, parent_id, created_at, last_accessed_at`
 	var p Project
 	if err := s.evoPool.QueryRow(ctx, insertSQL,
-		id, abs, req.DisplayName, projType, gitRemote, parentID,
-	).Scan(&p.ID, &p.Path, &p.DisplayName, &p.Type,
+		id, abs, req.DisplayName, projType, storeHost, gitRemote, parentID,
+	).Scan(&p.ID, &p.Path, &p.DisplayName, &p.Type, &p.Host,
 		&p.GitRemote, &p.ParentID, &p.CreatedAt, &p.LastAccessedAt); err != nil {
-		// 23505 = unique_violation on path: the folder is already registered.
+		// 23505 = unique_violation on (host, path): the folder is already
+		// registered on that host.
 		if strings.Contains(err.Error(), "23505") {
 			writeEvoErr(w, http.StatusConflict, "path already registered: "+abs)
 			return
@@ -450,50 +372,11 @@ func (s *APIServer) deleteProject(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// detectProjectType classifies a folder by how it relates to git:
-//
-//	folder     — no .git entry
-//	git-repo   — .git is a directory (a normal clone / main worktree)
-//	worktree   — .git is a file pointing into .../.git/worktrees/...
-//	submodule  — .git is a file pointing into .../.git/modules/...
-//
-// A linked worktree and a submodule both use a `.git` *file* (a gitdir
-// pointer) rather than a directory; we read it to tell them apart.
-func detectProjectType(dir string) string {
-	gitPath := filepath.Join(dir, ".git")
-	info, err := os.Lstat(gitPath)
-	if err != nil {
-		return "folder"
-	}
-	if info.IsDir() {
-		return "git-repo"
-	}
-	// .git is a file: "gitdir: <path>".
-	data, err := os.ReadFile(gitPath)
-	if err != nil {
-		return "git-repo"
-	}
-	pointer := strings.TrimSpace(string(data))
-	switch {
-	case strings.Contains(pointer, "/modules/"):
-		return "submodule"
-	case strings.Contains(pointer, "/worktrees/"):
-		return "worktree"
-	default:
-		return "git-repo"
-	}
-}
+// filepathBase returns the last element of a slash- or OS-separated path. Both
+// local (projectfs) and remote (deploy-agent) hosts are unix, so a forward
+// slash is the canonical separator; filepath.Base handles the local case too.
+func filepathBase(p string) string { return filepath.Base(p) }
 
-// gitRemoteURL returns the origin remote URL for a repo dir, or "" if there
-// is none / git is unavailable. Best-effort: a missing remote is normal for
-// a fresh repo and not an error.
-func gitRemoteURL(dir string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "config", "--get", "remote.origin.url")
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
+// urlQueryEscape escapes a value for use in a query string when proxying tree
+// and file requests to a remote host's deploy-agent.
+func urlQueryEscape(v string) string { return url.QueryEscape(v) }
