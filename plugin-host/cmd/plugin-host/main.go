@@ -53,6 +53,7 @@ import (
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/hostserver"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/manifest"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/persist"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/phmetrics"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/runner"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/secrets"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/stage"
@@ -199,6 +200,12 @@ func run() error {
 	metricsReg := prometheus.NewRegistry()
 	metricsReg.MustRegister(prometheus.NewGoCollector())
 	metricsReg.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	// plugin-host collectors (active-plugins gauge, spawn-failure +
+	// plugin-request-error counters) register onto THIS custom registry — the
+	// same one served on /metrics below. They use plain NewGauge/NewCounterVec
+	// (not promauto/default registerer), so without this call they'd never be
+	// scraped.
+	phmetrics.MustRegister(metricsReg)
 
 	r := mux.NewRouter()
 	r.HandleFunc("/health", healthHandler).Methods(http.MethodGet)

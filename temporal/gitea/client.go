@@ -169,6 +169,20 @@ func truncateForError(body []byte) string {
 // retry policy is left to callers — but logging at zero gives operators a chance
 // to spot tokens that are about to start failing.
 func (c *GiteaClient) checkRateLimit(resp *http.Response) {
+	// A 429 means Gitea actually rejected the call for exceeding the rate
+	// limit (as opposed to the running-low warning below, which fires off the
+	// X-RateLimit-Remaining header while requests still succeed). Count it
+	// here because checkRateLimit is invoked on every response across the
+	// client (GET, mutating POST, diff, merge), so this is the one choke point
+	// that sees them all.
+	if resp.StatusCode == http.StatusTooManyRequests {
+		GiteaRateLimited.Inc()
+		c.logger.WithFields(logrus.Fields{
+			"limit": resp.Header.Get("X-RateLimit-Limit"),
+			"reset": resp.Header.Get("X-RateLimit-Reset"),
+		}).Warn("Gitea returned 429 Too Many Requests")
+	}
+
 	remainingHdr := resp.Header.Get("X-RateLimit-Remaining")
 	if remainingHdr == "" {
 		return

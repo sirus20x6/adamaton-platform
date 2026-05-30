@@ -20,6 +20,7 @@ import (
 
 	pluginv1 "github.com/sirus20x6/adamaton-platform/plugin-host/gen/go/dr/plugin/v1"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/manifest"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/phmetrics"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/supervisor"
 )
 
@@ -70,6 +71,7 @@ func searchQueryHandler(sup *supervisor.Supervisor, manifests map[string]*manife
 					"plugin supervisor spawn not yet implemented; search disabled until Phase C"))
 				return
 			}
+			phmetrics.RequestErrors.WithLabelValues(source, "spawn").Inc()
 			logger.WithError(err).WithField("source", source).Warn("ensure running")
 			writeJSON(w, http.StatusBadGateway, errorBody("plugin unavailable"))
 			return
@@ -82,6 +84,7 @@ func searchQueryHandler(sup *supervisor.Supervisor, manifests map[string]*manife
 			Since:  q.Get("since"),
 		})
 		if err != nil {
+			phmetrics.RequestErrors.WithLabelValues(source, searchErrorType(ctx, err)).Inc()
 			logger.WithError(err).WithField("source", source).Warn("search query")
 			writeJSON(w, http.StatusBadGateway, errorBody("search failed: "+err.Error()))
 			return
@@ -95,7 +98,7 @@ func searchQueryHandler(sup *supervisor.Supervisor, manifests map[string]*manife
 }
 
 // searchFanOutRequest is the legacy {query, limit, sources?} body the
-// frontend's liveSearch() sends. ``sources`` is optional — when absent
+// frontend's liveSearch() sends. “sources“ is optional — when absent
 // we fan out to every search-category plugin.
 type searchFanOutRequest struct {
 	Query   string   `json:"query"`
@@ -175,6 +178,7 @@ func searchFanOutHandler(sup *supervisor.Supervisor, manifests map[string]*manif
 
 				client, _, err := sup.EnsureRunning(perCallCtx, src)
 				if err != nil {
+					phmetrics.RequestErrors.WithLabelValues(src, "spawn").Inc()
 					mu.Lock()
 					errs[src] = "spawn: " + err.Error()
 					mu.Unlock()
@@ -185,6 +189,7 @@ func searchFanOutHandler(sup *supervisor.Supervisor, manifests map[string]*manif
 					Limit: int32(limit),
 				})
 				if err != nil {
+					phmetrics.RequestErrors.WithLabelValues(src, searchErrorType(perCallCtx, err)).Inc()
 					mu.Lock()
 					errs[src] = err.Error()
 					mu.Unlock()
@@ -239,10 +244,21 @@ func searchFanOutHandler(sup *supervisor.Supervisor, manifests map[string]*manif
 	}
 }
 
+// searchErrorType classifies a failed plugin SearchQuery into the closed
+// error_type vocabulary phmetrics.RequestErrors expects. A call whose context
+// deadline expired is "timeout"; anything else is a generic "rpc" failure.
+// Keeping the set small bounds the metric's cardinality.
+func searchErrorType(ctx context.Context, err error) string {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "rpc"
+}
+
 // searchResultToHit projects the protobuf SearchResult into the JSON
 // shape the frontend RawHit consumer expects. Keeping this conversion
 // explicit (vs handing back the protojson default) lets us coerce
-// timestamps + handle the ``source_kind`` enum without leaking proto
+// timestamps + handle the “source_kind“ enum without leaking proto
 // internals into the wire format.
 func searchResultToHit(r *pluginv1.SearchResult) map[string]any {
 	h := map[string]any{

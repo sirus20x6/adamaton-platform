@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -160,5 +161,89 @@ func TestTail(t *testing.T) {
 	}
 	if got := tail(in, 10); got != in {
 		t.Errorf("tail(10) = %q, want %q", got, in)
+	}
+}
+
+func TestImageTag(t *testing.T) {
+	cases := map[string]string{
+		"adamaton-dashboard:sha-abc1234":                "sha-abc1234",
+		"registry.example/adamaton-dashboard:main":      "main",
+		"registry:5000/adamaton-dashboard:sha-deadbeef": "sha-deadbeef",
+		"registry:5000/adamaton-dashboard":              "", // no tag, only host:port colon
+		"adamaton-dashboard":                            "", // bare name, no tag
+		"adamaton-dashboard:v1.2.3@sha256:abcdef":       "v1.2.3",
+		"": "",
+	}
+	for img, want := range cases {
+		if got := imageTag(img); got != want {
+			t.Errorf("imageTag(%q) = %q, want %q", img, got, want)
+		}
+	}
+}
+
+func TestParseComposePS(t *testing.T) {
+	// NDJSON (one object per line) — the modern compose default.
+	ndjson := `{"Name":"adamaton-dashboard-1","Service":"dashboard","Image":"reg/adamaton-dashboard:sha-new","State":"running"}
+{"Name":"adamaton-worker-1","Service":"adamaton-worker","Image":"reg/adamaton-worker:main","State":"running"}`
+	entries, err := parseComposePS([]byte(ndjson))
+	if err != nil {
+		t.Fatalf("parseComposePS NDJSON: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+	if entries[0].Service != "dashboard" || entries[0].Image != "reg/adamaton-dashboard:sha-new" {
+		t.Errorf("unexpected first entry: %+v", entries[0])
+	}
+
+	// JSON array shape (older compose).
+	arr := `[{"Name":"c1","Service":"dashboard","Image":"reg/adamaton-dashboard:sha-x","State":"running"}]`
+	entries, err = parseComposePS([]byte(arr))
+	if err != nil {
+		t.Fatalf("parseComposePS array: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Image != "reg/adamaton-dashboard:sha-x" {
+		t.Errorf("array parse wrong: %+v", entries)
+	}
+
+	// Single object shape.
+	single := `{"Name":"c1","Service":"dashboard","Image":"reg/adamaton-dashboard:sha-y","State":"running"}`
+	entries, err = parseComposePS([]byte(single))
+	if err != nil {
+		t.Fatalf("parseComposePS single: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Image != "reg/adamaton-dashboard:sha-y" {
+		t.Errorf("single parse wrong: %+v", entries)
+	}
+
+	// Empty output -> no entries, no error.
+	entries, err = parseComposePS([]byte("  \n"))
+	if err != nil {
+		t.Fatalf("parseComposePS empty: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("empty should yield 0 entries, got %d", len(entries))
+	}
+
+	// Malformed JSON -> error.
+	if _, err := parseComposePS([]byte("{not json")); err == nil {
+		t.Errorf("expected error on malformed JSON")
+	}
+}
+
+func TestMetricsPath(t *testing.T) {
+	cases := map[string]string{
+		"/metrics":                 "/metrics",
+		"/restart":                 "/restart",
+		"/status":                  "/status",
+		"/projects":                "/projects/*",
+		"/projects/abc/terminal":   "/projects/*",
+		"/some-unknown-probe-path": "other",
+	}
+	for path, want := range cases {
+		r := httptest.NewRequest("GET", path, nil)
+		if got := metricsPath(r); got != want {
+			t.Errorf("metricsPath(%q) = %q, want %q", path, got, want)
+		}
 	}
 }

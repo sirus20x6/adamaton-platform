@@ -41,6 +41,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirupsen/logrus"
 
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/phmetrics"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/secrets"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/stage"
 )
@@ -401,6 +402,7 @@ func zoteroCompatSyncHandler(pool *pgxpool.Pool, _ *secrets.Manager, logger *log
 			INSERT INTO platform.plugin_runs (id, plugin_id, source, status, args, created_at)
 			VALUES ($1, 'zotero', 'web_api', 'pending', $2, NOW())
 		`, runID, mustMarshal(args)); err != nil {
+			phmetrics.RequestErrors.WithLabelValues("zotero", "run_enqueue").Inc()
 			logger.WithError(err).Warn("insert plugin_runs (web_api compat)")
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -562,6 +564,7 @@ func zoteroUploadSqliteHandler(pool *pgxpool.Pool, sec *secrets.Manager, stg *st
 			INSERT INTO platform.plugin_runs (id, plugin_id, source, status, args, created_at)
 			VALUES ($1, 'zotero', 'sqlite_upload', 'pending', $2, NOW())
 		`, runID, mustMarshal(args)); err != nil {
+			phmetrics.RequestErrors.WithLabelValues("zotero", "run_enqueue").Inc()
 			logger.WithError(err).Warn("insert plugin_runs (sqlite upload)")
 		}
 
