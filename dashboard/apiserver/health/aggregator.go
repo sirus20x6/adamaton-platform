@@ -58,6 +58,74 @@ type Snapshot struct {
 	Instances    []InstanceStatus   `json:"instances"`
 	Roles        []RoleStatus       `json:"roles"`
 	Capabilities []CapabilityStatus `json:"capabilities"`
+	// Workflows is the workflow-execution failure gauge — present only
+	// when a WorkflowFailureSource is wired. It lets operators see a
+	// "workflow failure storm" (a spike in failed runs) that the
+	// worker-heartbeat + queue-liveness probes above can't surface:
+	// workers can be perfectly healthy while every workflow they run
+	// fails. nil when no source is configured (e.g. the apiserver has no
+	// evo pool, or in unit tests).
+	Workflows *WorkflowHealth `json:"workflows,omitempty"`
+}
+
+// WorkflowHealth is the alert-friendly workflow failure gauge. Counts are
+// derived from the workflow-run store (workflow.runs) over rolling
+// windows so a dashboard can plot a sparkline and an alerting rule can
+// fire on FailedLastHour / FailureRate1h crossing a threshold.
+//
+// Status is a coarse self-assessment for the SPA's pill:
+//   - ok        — no failures in the last hour
+//   - degraded  — some failures, but below FailureStormThreshold
+//   - offline   — at or above FailureStormThreshold (a "failure storm")
+type WorkflowHealth struct {
+	Status Status `json:"status"`
+	// FailedLastHour is the count of runs that reached a terminal
+	// "failed" status with finished_at within the last hour.
+	FailedLastHour int `json:"workflows_failed_last_hour"`
+	// CompletedLastHour is the count of runs that finished successfully
+	// in the same window — the denominator for FailureRate1h.
+	CompletedLastHour int `json:"workflows_completed_last_hour"`
+	// RunningNow is the count of runs still in flight (not yet
+	// finished). Surfaced so a storm of stuck "running" rows is also
+	// visible, not just hard failures.
+	RunningNow int `json:"workflows_running_now"`
+	// FailureRate1h is FailedLastHour / (FailedLastHour +
+	// CompletedLastHour), in [0,1]. 0 when the window is empty.
+	FailureRate1h float64 `json:"workflow_failure_rate_1h"`
+	// FailedLast24h is the wider-window failure count, for context on
+	// whether an hourly spike is unusual.
+	FailedLast24h int `json:"workflows_failed_last_24h"`
+	// Detail is a short human-readable summary, mirroring the per-role
+	// Detail strings.
+	Detail string `json:"detail,omitempty"`
+	// Error is set (and Status=unknown) when the source query failed —
+	// the gauge is then advisory-only and must not be alerted on.
+	Error string `json:"error,omitempty"`
+}
+
+// FailureStormThreshold is the FailedLastHour count at or above which the
+// workflow gauge flips to "offline" (a failure storm worth paging on).
+// Chosen conservatively: a handful of failures is normal churn; ten in an
+// hour is a pattern. Exported so the alerting layer and tests agree on
+// the boundary.
+const FailureStormThreshold = 10
+
+// WorkflowFailureCounts is the raw tally a WorkflowFailureSource returns.
+// Keeping it separate from WorkflowHealth lets the source stay a thin SQL
+// wrapper while the aggregator owns the status/rate derivation.
+type WorkflowFailureCounts struct {
+	FailedLastHour    int
+	CompletedLastHour int
+	RunningNow        int
+	FailedLast24h     int
+}
+
+// WorkflowFailureSource yields workflow-run failure tallies. The
+// production impl (PgWorkflowFailureSource) queries workflow.runs; tests
+// inject a fake. Returning an error leaves the gauge in an "unknown"
+// advisory state rather than failing the whole snapshot.
+type WorkflowFailureSource interface {
+	WorkflowFailureCounts(ctx context.Context) (WorkflowFailureCounts, error)
 }
 
 // Probers bundles the per-kind impls. Aggregator owns this and dispatches
@@ -78,6 +146,12 @@ type Aggregator struct {
 	fleet           *FleetClient
 	probers         Probers
 	refreshInterval time.Duration
+
+	// workflowSrc backs the workflow-failure gauge. Optional: nil means
+	// the snapshot omits Snapshot.Workflows entirely. Set via
+	// SetWorkflowSource at wiring time (kept off NewAggregator so the
+	// dozens of existing call sites + tests don't change).
+	workflowSrc WorkflowFailureSource
 
 	// Local docker-network DNS: when the apiserver runs on pi5, a role
 	// like r2g resolves to "r2g:7373" via docker-compose DNS. When
@@ -111,6 +185,14 @@ func NewAggregator(t *Topology, fleet *FleetClient, probers Probers, refreshInte
 	empty := &Snapshot{GeneratedAt: time.Now()}
 	a.cache.Store(empty)
 	return a
+}
+
+// SetWorkflowSource wires the workflow-failure gauge. Call before Start.
+// A nil source (or never calling this) leaves Snapshot.Workflows nil, so
+// the gauge is purely additive — existing deployments without a workflow
+// store are unaffected.
+func (a *Aggregator) SetWorkflowSource(src WorkflowFailureSource) {
+	a.workflowSrc = src
 }
 
 // Start spawns the refresh goroutine + does an initial fanout. Returns
@@ -181,13 +263,72 @@ func (a *Aggregator) refresh(ctx context.Context) {
 	roles := a.rollupRoles(instances)
 	caps := a.rollupCapabilities(roles)
 
+	// 4. Workflow-failure gauge (optional). Derived from the workflow-run
+	//    store, independent of the per-role probes above: a fleet can be
+	//    all-green at the worker layer while every workflow it runs is
+	//    failing, so this is the gauge that catches a "failure storm".
+	wf := a.workflowHealth(ctx)
+
 	snap := &Snapshot{
 		GeneratedAt:  time.Now(),
 		Instances:    instances,
 		Roles:        roles,
 		Capabilities: caps,
+		Workflows:    wf,
 	}
 	a.cache.Store(snap)
+}
+
+// workflowHealth queries the workflow-failure source (when configured)
+// and derives the alert-friendly gauge. Returns nil when no source is
+// wired so the field is omitted from the JSON. A query error yields a
+// non-nil gauge with Status=unknown + Error set, never a panic — the rest
+// of the snapshot must still publish.
+func (a *Aggregator) workflowHealth(ctx context.Context) *WorkflowHealth {
+	if a.workflowSrc == nil {
+		return nil
+	}
+	counts, err := a.workflowSrc.WorkflowFailureCounts(ctx)
+	if err != nil {
+		return &WorkflowHealth{
+			Status: StatusUnknown,
+			Error:  err.Error(),
+			Detail: "workflow failure source unavailable",
+		}
+	}
+	return deriveWorkflowHealth(counts)
+}
+
+// deriveWorkflowHealth turns raw counts into the gauge: it computes the
+// 1h failure rate and the coarse status pill. Pure function so it's unit
+// tested without a DB. Status ladder:
+//   - no failures this hour          -> ok
+//   - failures < storm threshold     -> degraded
+//   - failures >= storm threshold    -> offline (page-worthy storm)
+func deriveWorkflowHealth(c WorkflowFailureCounts) *WorkflowHealth {
+	wf := &WorkflowHealth{
+		FailedLastHour:    c.FailedLastHour,
+		CompletedLastHour: c.CompletedLastHour,
+		RunningNow:        c.RunningNow,
+		FailedLast24h:     c.FailedLast24h,
+	}
+	if denom := c.FailedLastHour + c.CompletedLastHour; denom > 0 {
+		wf.FailureRate1h = float64(c.FailedLastHour) / float64(denom)
+	}
+	switch {
+	case c.FailedLastHour >= FailureStormThreshold:
+		wf.Status = StatusOffline
+		wf.Detail = fmt.Sprintf("workflow failure storm: %d failed in the last hour (>= %d)",
+			c.FailedLastHour, FailureStormThreshold)
+	case c.FailedLastHour > 0:
+		wf.Status = StatusDegraded
+		wf.Detail = fmt.Sprintf("%d workflow(s) failed in the last hour (%.0f%% of finished)",
+			c.FailedLastHour, wf.FailureRate1h*100)
+	default:
+		wf.Status = StatusOK
+		wf.Detail = "no workflow failures in the last hour"
+	}
+	return wf
 }
 
 // discoverInstances asks each host's deploy-agent which services it
