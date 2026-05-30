@@ -591,6 +591,12 @@ func (s *APIServer) setupRoutes() {
 	// version lifecycle; this just reads + kicks Temporal workflows.
 	s.registerDatasetsEndpoints(api)
 
+	// Projects registry — CRUD over evo.projects, the backing store for
+	// the dashboard "Projects" sidebar (file-tree, persistent terminals,
+	// per-project Kanban land on top in later phases). Same evoPool, same
+	// 503-when-nil behaviour. See docs/PROJECTS_KANBAN.md.
+	s.registerProjectsEndpoints(api)
+
 	// Cross-subsystem status fan-out for the unified landing page.
 	api.HandleFunc("/system/status", s.handleSystemStatus).Methods("GET")
 
