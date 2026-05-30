@@ -208,7 +208,7 @@ func (s *APIServer) createSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CreateScheduleRequest
-	if err := decodeJSONBody(r, &req); err != nil {
+	if err := decodeJSONBody(w, r, &req); err != nil {
 		s.sendJSON(w, http.StatusBadRequest, APIResponse{
 			Error: err.Error(), Success: false,
 		})
@@ -282,7 +282,7 @@ func (s *APIServer) updateSchedule(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["scheduleID"]
 
 	var req UpdateScheduleRequest
-	if err := decodeJSONBody(r, &req); err != nil {
+	if err := decodeJSONBody(w, r, &req); err != nil {
 		s.sendJSON(w, http.StatusBadRequest, APIResponse{
 			Error: err.Error(), Success: false,
 		})
@@ -680,9 +680,13 @@ func pauseLabel(pause bool) string {
 }
 
 // decodeJSONBody is a small wrapper that bounds the body, decodes, and
-// returns a friendly error for the two common failure modes.
-func decodeJSONBody(r *http.Request, dst any) error {
-	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
+// returns a friendly error for the two common failure modes. The
+// ResponseWriter is threaded into MaxBytesReader so the limiter can flag
+// the connection for close on an oversized body (the nil form silently
+// drops that signal), matching every other capped POST handler in this
+// package.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
