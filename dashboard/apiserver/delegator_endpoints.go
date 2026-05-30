@@ -4,7 +4,6 @@
 // already ported); the rest will be deleted. Do not extend this file --
 // new dashboard work belongs in the deepresearch frontend / platform
 // backend, not here.
-//
 package apiserver
 
 import (
@@ -33,13 +32,36 @@ func (s *APIServer) setupDelegatorRoutes(api *mux.Router) {
 	api.HandleFunc("/delegator/tasks", s.handleDelegatorTasks).Methods("GET")
 }
 
-func (s *APIServer) handleDelegatorQuota(w http.ResponseWriter, r *http.Request) {
-	days := 1
-	if v := r.URL.Query().Get("days"); v != "" {
-		if n, err := strconvAtoiSafe(v); err == nil && n > 0 && n <= 30 {
-			days = n
-		}
+// Bounds for the ?days= window on /delegator/quota. The quota aggregator
+// scans CCSAVER interactions over this many days, so an unbounded value
+// is both a DoS lever and meaningless (older data is rotated out). A
+// missing/invalid/out-of-range value falls back to defaultQuotaDays; a
+// too-large value is clamped UP to maxQuotaDays rather than silently
+// reset to 1, so "give me everything" still returns the full window.
+const (
+	defaultQuotaDays = 1
+	maxQuotaDays     = 30
+)
+
+// clampDays parses the raw ?days= value and clamps it into
+// [1, maxQuotaDays], returning defaultQuotaDays for empty, non-numeric,
+// or non-positive input. Pure function — covered by a unit test.
+func clampDays(raw string) int {
+	if raw == "" {
+		return defaultQuotaDays
 	}
+	n, err := strconvAtoiSafe(raw)
+	if err != nil || n <= 0 {
+		return defaultQuotaDays
+	}
+	if n > maxQuotaDays {
+		return maxQuotaDays
+	}
+	return n
+}
+
+func (s *APIServer) handleDelegatorQuota(w http.ResponseWriter, r *http.Request) {
+	days := clampDays(r.URL.Query().Get("days"))
 	usage, err := quota.GetAllAgentUsage(r.Context(), days, quota.AggregateConfig{
 		Logger:              s.logger,
 		SkipGeminiLiveQuota: false,
