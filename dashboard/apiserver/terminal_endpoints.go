@@ -29,32 +29,21 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"os"
 	"os/exec"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/creack/pty"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
+	"github.com/sirus20x6/adamaton-core/projectfs"
 )
 
-// ptyBackend returns the configured PTY backend ("tmux" or "none"). Anything
-// other than "none" (including the empty default) means tmux is enabled.
-func ptyBackend() string {
-	if v := strings.TrimSpace(strings.ToLower(os.Getenv("PTY_BACKEND"))); v == "none" {
-		return "none"
-	}
-	return "tmux"
-}
-
-// terminalsEnabled reports whether the tmux backend is active. When false, the
-// endpoints respond 503 and the boot reconciler/reaper are no-ops.
-func terminalsEnabled() bool { return ptyBackend() != "none" }
+// terminalsEnabled reports whether the tmux backend is active (PTY_BACKEND !=
+// "none"). When false, the endpoints respond 503 and the boot reconciler/reaper
+// are no-ops. Delegates to projectfs.Enabled so the gate lives in one place.
+func terminalsEnabled() bool { return projectfs.Enabled() }
 
 // TerminalSession is the wire shape for /api/v1/projects/{id}/terminals.
 // Mirrors evo.terminal_sessions (minus tmux_session, an internal detail that
@@ -188,14 +177,15 @@ func (s *APIServer) createTerminal(w http.ResponseWriter, r *http.Request) {
 		req.Rows = 1000
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
 
-	// Look up the project to resolve its on-disk path (the tmux working dir).
-	var projectPath string
+	// Look up the project to resolve its on-disk path (the tmux working dir)
+	// and the host the folder lives on.
+	var projectPath, projectHost string
 	if err := s.evoPool.QueryRow(ctx,
-		"SELECT path FROM evo.projects WHERE id = $1", projectID,
-	).Scan(&projectPath); err != nil {
+		"SELECT path, host FROM evo.projects WHERE id = $1", projectID,
+	).Scan(&projectPath, &projectHost); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeEvoErr(w, http.StatusNotFound, "project not found")
 			return
@@ -204,22 +194,26 @@ func (s *APIServer) createTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sid := "adam-" + uuid.NewString()
+	local := isLocalHost(projectHost)
 
-	// tmux new-session -d -s <id> -x <cols> -y <rows> -c <project.path> <command>
-	// Run the command through the user's login shell so e.g. "htop" or a bare
-	// "bash" both work; tmux execs the final argument as the session command.
-	newCmd := exec.CommandContext(ctx, "tmux", "new-session", "-d",
-		"-s", sid,
-		"-x", strconv.Itoa(req.Cols),
-		"-y", strconv.Itoa(req.Rows),
-		"-c", projectPath,
-		req.Command,
-	)
-	if out, err := newCmd.CombinedOutput(); err != nil {
-		writeEvoErr(w, http.StatusInternalServerError,
-			"tmux new-session: "+err.Error()+": "+strings.TrimSpace(string(out)))
-		return
+	// Create the tmux session: locally via projectfs, or on the remote host's
+	// deploy-agent. In both cases the session id is the key for the row and the
+	// tmux session name; remotely the agent mints its own "adam-"+uuid id, so
+	// we adopt that as our row id to keep the apiserver and agent in lock-step.
+	var sid string
+	if local {
+		sid = "adam-" + uuid.NewString()
+		if err := projectfs.CreateSession(sid, projectPath, req.Command, req.Cols, req.Rows); err != nil {
+			writeEvoErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	} else {
+		id, err := s.createRemoteTerminal(ctx, projectHost, projectPath, req)
+		if err != nil {
+			writeEvoErr(w, http.StatusBadGateway, "create terminal on host "+projectHost+": "+err.Error())
+			return
+		}
+		sid = id
 	}
 
 	const insertSQL = `
@@ -231,9 +225,13 @@ RETURNING ` + terminalSelectCols
 	if err := scanTerminal(s.evoPool.QueryRow(ctx, insertSQL,
 		sid, projectID, req.Title, req.Command, projectPath, req.Cols, req.Rows,
 	), &t); err != nil {
-		// The row insert failed after we already spawned tmux — kill the
-		// orphan session so we don't leak it.
-		s.killTmuxSession(sid)
+		// The row insert failed after we already spawned the session — kill the
+		// orphan (locally or on the agent) so we don't leak it.
+		if local {
+			_ = projectfs.KillSession(sid)
+		} else {
+			s.deleteRemoteTerminal(context.Background(), projectHost, sid)
+		}
 		writeEvoErr(w, http.StatusInternalServerError, "insert: "+err.Error())
 		return
 	}
@@ -270,12 +268,16 @@ func (s *APIServer) terminalWS(w http.ResponseWriter, r *http.Request) {
 	sid := mux.Vars(r)["sid"]
 
 	// Confirm the session exists and is live before upgrading, so a bogus sid
-	// gets a clean 404 instead of a websocket that immediately dies.
+	// gets a clean 404 instead of a websocket that immediately dies. We also
+	// pull the project host to decide local-attach vs remote reverse-proxy.
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	var status string
+	var status, host string
 	err := s.evoPool.QueryRow(ctx,
-		"SELECT status FROM evo.terminal_sessions WHERE id = $1", sid,
-	).Scan(&status)
+		`SELECT ts.status, p.host
+		 FROM evo.terminal_sessions ts
+		 JOIN evo.projects p ON p.id = ts.project_id
+		 WHERE ts.id = $1`, sid,
+	).Scan(&status, &host)
 	cancel()
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -296,78 +298,30 @@ func (s *APIServer) terminalWS(w http.ResponseWriter, r *http.Request) {
 		s.logger.WithError(err).Warn("terminalWS: upgrade failed")
 		return
 	}
-	s.bridgeTerminal(sid, conn)
-}
 
-// bridgeTerminal wires a PTY running `tmux attach-session -t <sid>` to the
-// websocket: pty output -> ws (binary frames), ws input -> pty. It blocks
-// until either side closes, then kills the attach client process only (the
-// tmux session persists for the next attach).
-func (s *APIServer) bridgeTerminal(sid string, conn *websocket.Conn) {
-	defer conn.Close()
-
-	// `tmux attach-session` (no -d) gives this connection its own client so
-	// resize is per-attach. The session outlives the attach.
-	attach := exec.Command("tmux", "attach-session", "-t", sid)
-	ptmx, err := pty.Start(attach)
-	if err != nil {
-		s.logger.WithError(err).WithField("sid", sid).Warn("terminalWS: pty start failed")
-		_ = conn.WriteMessage(websocket.TextMessage, []byte("\r\n[adam: failed to attach terminal: "+err.Error()+"]\r\n"))
+	if isLocalHost(host) {
+		// projectfs.BridgeWebsocket owns the local PTY<->ws bridge: it attaches
+		// `tmux attach-session -t <sid>`, pipes both directions, and tears down
+		// only the attach client (the tmux session persists for the next
+		// attach). It closes conn on return.
+		if err := projectfs.BridgeWebsocket(conn, sid); err != nil {
+			s.logger.WithError(err).WithField("sid", sid).Warn("terminalWS: local bridge failed")
+		}
 		return
 	}
 
-	// Register the live pty so resizeTerminal can drive pty.Setsize on it.
-	registerTerminalPTY(sid, ptmx)
-	defer unregisterTerminalPTY(sid, ptmx)
-
-	// Ensure the attach client is reaped and the pty closed on the way out.
-	// Killing the attach client does NOT kill the tmux session.
-	defer func() {
-		_ = ptmx.Close()
-		if attach.Process != nil {
-			_ = attach.Process.Kill()
-		}
-		_ = attach.Wait()
-	}()
-
-	var once sync.Once
-	done := make(chan struct{})
-	closeDone := func() { once.Do(func() { close(done) }) }
-
-	// pty -> ws. EOF (the attach client exited) ends the bridge.
-	go func() {
-		defer closeDone()
-		buf := make([]byte, 4096)
-		for {
-			n, rerr := ptmx.Read(buf)
-			if n > 0 {
-				if werr := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); werr != nil {
-					return
-				}
-			}
-			if rerr != nil {
-				return
-			}
-		}
-	}()
-
-	// ws -> pty. A read error (client closed) ends the bridge.
-	go func() {
-		defer closeDone()
-		for {
-			_, msg, rerr := conn.ReadMessage()
-			if rerr != nil {
-				return
-			}
-			if len(msg) > 0 {
-				if _, werr := ptmx.Write(msg); werr != nil {
-					return
-				}
-			}
-		}
-	}()
-
-	<-done
+	// Remote: dial the host's deploy-agent ws and pipe frames both directions.
+	dctx, dcancel := context.WithTimeout(context.Background(), 12*time.Second)
+	agentConn, derr := dialAgentTerminalWS(dctx, host, sid)
+	dcancel()
+	if derr != nil {
+		s.logger.WithError(derr).WithField("sid", sid).Warn("terminalWS: remote dial failed")
+		_ = conn.WriteMessage(websocket.TextMessage,
+			[]byte("\r\n[adam: failed to attach remote terminal: "+derr.Error()+"]\r\n"))
+		_ = conn.Close()
+		return
+	}
+	bridgeWSConns(conn, agentConn)
 }
 
 func (s *APIServer) resizeTerminal(w http.ResponseWriter, r *http.Request) {
@@ -398,18 +352,20 @@ func (s *APIServer) resizeTerminal(w http.ResponseWriter, r *http.Request) {
 		req.Rows = 1000
 	}
 
-	// Resize every live attach pty for this session so the in-flight bridge's
-	// terminal geometry follows the client's window.
-	resizeTerminalPTYs(sid, req.Cols, req.Rows)
+	host, ok := s.terminalHost(w, r, sid)
+	if !ok {
+		return
+	}
 
-	// Also resize the tmux window itself so a fresh attach picks up the new
-	// geometry. Best-effort: a missing session here is not fatal to the resize
-	// of the live pty above.
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	resizeCmd := exec.CommandContext(ctx, "tmux", "resize-window", "-t", sid,
-		"-x", strconv.Itoa(req.Cols), "-y", strconv.Itoa(req.Rows))
-	_ = resizeCmd.Run()
+	// Resize the tmux window so a fresh attach picks up the new geometry —
+	// locally via projectfs.ResizeSession, remotely by proxying to the host's
+	// deploy-agent. Best-effort: a missing session is not fatal to the persist.
+	if isLocalHost(host) {
+		_ = projectfs.ResizeSession(sid, req.Cols, req.Rows)
+	} else {
+		body, _ := json.Marshal(map[string]int{"cols": req.Cols, "rows": req.Rows})
+		s.resizeRemoteTerminal(r.Context(), host, sid, body)
+	}
 
 	// Persist the latest geometry so a reattach / list reflects it.
 	uctx, ucancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -435,10 +391,20 @@ func (s *APIServer) deleteTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	sid := mux.Vars(r)["sid"]
 
+	host, ok := s.terminalHost(w, r, sid)
+	if !ok {
+		return
+	}
+
 	// Kill the tmux session (best-effort: it may already be gone), then flip
 	// the row to 'dead'. We mark the row even if the kill found nothing so the
-	// UI stops offering an attach.
-	s.killTmuxSession(sid)
+	// UI stops offering an attach. Local kills go through projectfs; remote
+	// kills proxy to the host's deploy-agent.
+	if isLocalHost(host) {
+		_ = projectfs.KillSession(sid)
+	} else {
+		s.deleteRemoteTerminal(r.Context(), host, sid)
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
@@ -465,71 +431,130 @@ func (s *APIServer) deleteTerminal(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Live-PTY registry — resizeTerminal needs a handle on the pty owned by the
-// in-flight websocket bridge so it can call pty.Setsize. A session can have
-// more than one live attach (two browser tabs), so we track a set per sid.
-//
-// This state is process-global rather than a field on APIServer: the
-// integration agent owns server.go's struct definition, and a single apiserver
-// process only ever runs one APIServer, so a package-level registry is both
-// simpler to wire (no constructor change) and behaviourally identical.
+// Host resolution + remote-terminal proxying. A terminal's host is the host
+// of the project it belongs to; local terminals run via projectfs, remote ones
+// proxy to that host's deploy-agent /project/terminals API. The apiserver keeps
+// the evo.terminal_sessions bookkeeping row regardless of host.
 // ─────────────────────────────────────────────────────────────────────
 
-// ptyFile is the slice of *os.File that pty.Setsize needs. pty.Start returns an
-// *os.File, which satisfies this.
-type ptyFile = *os.File
-
-var (
-	termPTYMu sync.Mutex
-	termPTYs  = map[string]map[ptyFile]struct{}{}
-)
-
-// registerTerminalPTY records a live attach pty for a session.
-func registerTerminalPTY(sid string, ptmx ptyFile) {
-	termPTYMu.Lock()
-	defer termPTYMu.Unlock()
-	set := termPTYs[sid]
-	if set == nil {
-		set = make(map[ptyFile]struct{})
-		termPTYs[sid] = set
+// terminalHost loads the project host for a terminal session via the
+// terminal_sessions→projects join, returning false (after writing the
+// response) when the pool is nil or the session is unknown.
+func (s *APIServer) terminalHost(w http.ResponseWriter, r *http.Request, sid string) (string, bool) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	var host string
+	err := s.evoPool.QueryRow(ctx,
+		`SELECT p.host
+		 FROM evo.terminal_sessions ts
+		 JOIN evo.projects p ON p.id = ts.project_id
+		 WHERE ts.id = $1`, sid,
+	).Scan(&host)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeEvoErr(w, http.StatusNotFound, "terminal not found")
+			return "", false
+		}
+		writeEvoErr(w, http.StatusInternalServerError, "lookup: "+err.Error())
+		return "", false
 	}
-	set[ptmx] = struct{}{}
+	return host, true
 }
 
-func unregisterTerminalPTY(sid string, ptmx ptyFile) {
-	termPTYMu.Lock()
-	defer termPTYMu.Unlock()
-	set := termPTYs[sid]
-	if set == nil {
+// createRemoteTerminal POSTs to the host's deploy-agent /project/terminals and
+// returns the agent-minted session id ("adam-"+uuid). The agent runs
+// projectfs.CreateSession on its own host with the given root/command/geometry.
+func (s *APIServer) createRemoteTerminal(ctx context.Context, host, root string, req TerminalCreateRequest) (string, error) {
+	base, ok := agentBaseURL(host)
+	if !ok {
+		return "", errors.New("no deploy-agent URL for host " + host)
+	}
+	token := deployAgentToken()
+	if token == "" {
+		return "", errors.New("DEPLOY_AGENT_TOKEN not set on dashboard")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"root":    root,
+		"command": req.Command,
+		"cols":    req.Cols,
+		"rows":    req.Rows,
+	})
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		base+"/project/terminals", strings.NewReader(string(body)))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 12 * time.Second}).Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := strings.TrimSpace(string(rb))
+		if msg == "" {
+			msg = resp.Status
+		}
+		return "", errors.New(msg)
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rb, &out); err != nil {
+		return "", errors.New("decode terminal id: " + err.Error())
+	}
+	if out.ID == "" {
+		return "", errors.New("agent returned empty terminal id")
+	}
+	return out.ID, nil
+}
+
+// resizeRemoteTerminal best-effort POSTs the new geometry to the host's
+// deploy-agent /project/terminals/{id}/resize. Errors are swallowed: the
+// persisted geometry below is the source of truth for a reattach.
+func (s *APIServer) resizeRemoteTerminal(parent context.Context, host, sid string, body []byte) {
+	base, ok := agentBaseURL(host)
+	if !ok {
 		return
 	}
-	delete(set, ptmx)
-	if len(set) == 0 {
-		delete(termPTYs, sid)
-	}
-}
-
-func resizeTerminalPTYs(sid string, cols, rows int) {
-	termPTYMu.Lock()
-	set := termPTYs[sid]
-	ptmxs := make([]ptyFile, 0, len(set))
-	for p := range set {
-		ptmxs = append(ptmxs, p)
-	}
-	termPTYMu.Unlock()
-
-	ws := &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}
-	for _, p := range ptmxs {
-		_ = pty.Setsize(p, ws)
-	}
-}
-
-// killTmuxSession runs `tmux kill-session -t <sid>`, swallowing the
-// "session not found" case. Best-effort; never returns an error to the caller.
-func (s *APIServer) killTmuxSession(sid string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	token := deployAgentToken()
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(ctx, "tmux", "kill-session", "-t", sid).Run()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		base+"/project/terminals/"+sid+"/resize", strings.NewReader(string(body)))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+}
+
+// deleteRemoteTerminal best-effort DELETEs a terminal on the host's
+// deploy-agent. Errors are swallowed (the row is flipped 'dead' regardless).
+func (s *APIServer) deleteRemoteTerminal(parent context.Context, host, sid string) {
+	base, ok := agentBaseURL(host)
+	if !ok {
+		return
+	}
+	token := deployAgentToken()
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		base+"/project/terminals/"+sid, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
 }
 
 // checkTerminalToken mirrors authMiddleware for the websocket handshake, where
@@ -571,8 +596,15 @@ func (s *APIServer) ReconcileTerminals(ctx context.Context) {
 
 	alive := s.listTmuxSessions(ctx)
 
+	// Only reconcile sessions whose project lives on THIS host: a remote
+	// session's tmux process runs on the agent, so its absence from the local
+	// `tmux ls` says nothing about its liveness.
 	rows, err := s.evoPool.Query(ctx,
-		"SELECT id FROM evo.terminal_sessions WHERE status = 'live'")
+		`SELECT ts.id
+		 FROM evo.terminal_sessions ts
+		 JOIN evo.projects p ON p.id = ts.project_id
+		 WHERE ts.status = 'live' AND `+localHostSQLPredicate("p.host"),
+		localHostSQLArg())
 	if err != nil {
 		s.logger.WithError(err).Warn("ReconcileTerminals: query live sessions failed")
 		return
@@ -642,9 +674,16 @@ func (s *APIServer) reapOnce(parent context.Context) {
 
 	alive := s.listTmuxSessions(ctx)
 
-	// Collect the set of ids we still know about.
+	// Collect the set of LOCAL ids we still know about. Remote sessions (whose
+	// project lives on another host) are deliberately excluded: their tmux
+	// process runs on the agent, so the local `tmux ls` is irrelevant to them.
 	known := make(map[string]string) // id -> status
-	rows, err := s.evoPool.Query(ctx, "SELECT id, status FROM evo.terminal_sessions")
+	rows, err := s.evoPool.Query(ctx,
+		`SELECT ts.id, ts.status
+		 FROM evo.terminal_sessions ts
+		 JOIN evo.projects p ON p.id = ts.project_id
+		 WHERE `+localHostSQLPredicate("p.host"),
+		localHostSQLArg())
 	if err != nil {
 		s.logger.WithError(err).Warn("terminal reaper: query rows failed")
 		return
@@ -668,7 +707,7 @@ func (s *APIServer) reapOnce(parent context.Context) {
 			continue
 		}
 		if _, ok := known[name]; !ok {
-			s.killTmuxSession(name)
+			_ = projectfs.KillSession(name)
 			s.logger.WithField("sid", name).Info("terminal reaper: killed orphan tmux session")
 		}
 	}
