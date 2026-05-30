@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -42,27 +43,55 @@ func isLocalHost(host string) bool {
 }
 
 // registerableHosts is the deduped set of hosts a project can be registered on:
-// the local host plus every host with a configured deploy-agent URL. Sorted
-// with the local host first so the UI can default to it.
+// the local host plus every host with a configured deploy-agent URL. Aliases of
+// the same physical box (racks.yaml — e.g. "workstation" and "blackwell" name
+// one machine) collapse to the canonical rack host so each box appears once,
+// matching the Nodes view. The local host is listed first so the UI defaults to it.
 func registerableHosts() []string {
-	local := inferLocalHost()
-	seen := map[string]struct{}{local: {}}
-	out := []string{local}
-	for host := range deployAgentURLs() {
-		if _, ok := seen[host]; ok {
-			continue
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(host string) {
+		if host == "" {
+			return
+		}
+		if rack, ok := resolveRack(host); ok {
+			host = rack.Host // collapse alias -> canonical box
+		}
+		if _, dup := seen[host]; dup {
+			return
 		}
 		seen[host] = struct{}{}
 		out = append(out, host)
+	}
+	add(inferLocalHost())
+	hosts := make([]string, 0, len(deployAgentURLs()))
+	for host := range deployAgentURLs() {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts) // stable order before alias-collapse
+	for _, host := range hosts {
+		add(host)
 	}
 	return out
 }
 
 // agentBaseURL resolves the deploy-agent base URL for a host, returning ""
-// (and false) when no URL is configured for it.
+// (and false) when none is configured. It is alias-tolerant: a project may be
+// stored under a canonical rack host while ADAMATON_DEPLOY_AGENTS is keyed by an
+// alias (or vice versa), so we fall back to every alias of the same rack.
 func agentBaseURL(host string) (string, bool) {
-	base, ok := deployAgentURLs()[host]
-	return base, ok && base != ""
+	urls := deployAgentURLs()
+	if base, ok := urls[host]; ok && base != "" {
+		return base, true
+	}
+	if rack, ok := resolveRack(host); ok {
+		for _, alias := range append([]string{rack.Host}, rack.Aliases...) {
+			if base, ok := urls[alias]; ok && base != "" {
+				return base, true
+			}
+		}
+	}
+	return "", false
 }
 
 // localHostSQLPredicate renders a SQL boolean that is true when the host column
