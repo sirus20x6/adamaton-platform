@@ -12,12 +12,14 @@
 FROM --platform=$BUILDPLATFORM golang:1.25-trixie AS build
 ARG TARGETARCH
 WORKDIR /src
-COPY platform/deploy-agent/go.mod platform/deploy-agent/go.sum* ./
-RUN go mod download
-# Bring in deploy-agent source AND the umbrella's worker-types catalog
-# so go:embed deploy/worker-types/*.yml resolves.
-COPY platform/deploy-agent/. ./
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
+# deploy-agent now imports core/projectfs (file-tree + tmux) for the
+# /project/* endpoints, so lay out the umbrella structure and build with
+# GOWORK=off, honouring go.mod's `replace ../../core`. (projectfs pulls only
+# creack/pty + gorilla/websocket — no ztok — so core is the only sibling needed.)
+COPY core ./core
+COPY platform ./platform
+WORKDIR /src/platform/deploy-agent
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} GOWORK=off \
     go build -trimpath -ldflags='-s -w' \
     -o /out/deploy-agent ./cmd/deploy-agent
 
@@ -31,7 +33,7 @@ COPY deploy/worker-types /etc/adamaton/worker-types
 FROM debian:trixie-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates tzdata curl gnupg \
+      ca-certificates tzdata curl gnupg tmux bash \
  && install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
  && chmod a+r /etc/apt/keyrings/docker.gpg \
