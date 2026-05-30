@@ -44,7 +44,10 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
     -o /out/api ./platform/dashboard/cmd/api
 
 FROM alpine:3.21
-RUN apk --no-cache add ca-certificates tzdata
+# tmux + bash back the persistent-terminal feature (apiserver terminal_endpoints.go
+# shells out to `tmux` and spawns `bash` as the default session command, so both
+# must exist in the runtime image). Gated at runtime behind PTY_BACKEND.
+RUN apk --no-cache add ca-certificates tzdata tmux bash
 COPY --from=build /out/api /usr/local/bin/api
 # Workflow-node catalog. The apiserver's resolvePluginDirs() looks for
 # ${EVO_HOME}/plugins/{builtin,community,n8n}; baking the source tree in
