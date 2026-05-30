@@ -3,16 +3,17 @@
 // works unchanged against either backend during the cutover.
 //
 // Routes:
-//   GET    /platform/plugins                  list manifests
-//   GET    /platform/plugins/runs             paginated run history
-//   GET    /platform/plugins/runs/{run_id}    single run row
-//   GET    /platform/plugins/items            paginated item history
-//   DELETE /platform/plugins/items/{item_id}  delete one item row
-//   DELETE /platform/plugins/items            bulk-delete items by filter
-//   GET    /platform/plugins/{id}             single manifest + config_schema
-//   POST   /platform/plugins/{id}/run         kick off an importer run
-//   GET    /platform/plugins/{id}/config      read decrypted config blob
-//   PUT    /platform/plugins/{id}/config      write config blob
+//
+//	GET    /platform/plugins                  list manifests
+//	GET    /platform/plugins/runs             paginated run history
+//	GET    /platform/plugins/runs/{run_id}    single run row
+//	GET    /platform/plugins/items            paginated item history
+//	DELETE /platform/plugins/items/{item_id}  delete one item row
+//	DELETE /platform/plugins/items            bulk-delete items by filter
+//	GET    /platform/plugins/{id}             single manifest + config_schema
+//	POST   /platform/plugins/{id}/run         kick off an importer run
+//	GET    /platform/plugins/{id}/config      read decrypted config blob
+//	PUT    /platform/plugins/{id}/config      write config blob
 //
 // Order matters: every static /runs and /items route is registered
 // BEFORE /{id} so the variable path doesn't shadow them. gorilla/mux
@@ -35,6 +36,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/manifest"
+	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/phmetrics"
 	"github.com/sirus20x6/adamaton-platform/plugin-host/internal/secrets"
 )
 
@@ -139,6 +141,7 @@ func createRunHandler(pool *pgxpool.Pool, manifests map[string]*manifest.Manifes
 			VALUES ($1, $2, 'manual', 'pending', $3, NOW())
 		`, runID, id, mustMarshal(body))
 		if err != nil {
+			phmetrics.RequestErrors.WithLabelValues(id, "run_enqueue").Inc()
 			logger.WithError(err).Warn("insert plugin_runs")
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -252,12 +255,12 @@ type rowScanner interface {
 
 func scanRunRow(row rowScanner) (map[string]any, error) {
 	var (
-		id, pluginID, statusStr                                  string
-		source, mode                                             *string
-		args, totals                                             []byte
-		corpusID                                                 *uuid.UUID
-		errMsg                                                   *string
-		startedAt, finishedAt, createdAt                         *jsonTime
+		id, pluginID, statusStr          string
+		source, mode                     *string
+		args, totals                     []byte
+		corpusID                         *uuid.UUID
+		errMsg                           *string
+		startedAt, finishedAt, createdAt *jsonTime
 	)
 	if err := row.Scan(&id, &pluginID, &source, &mode, &args, &corpusID,
 		&statusStr, &totals, &errMsg, &startedAt, &finishedAt, &createdAt); err != nil {
@@ -441,6 +444,7 @@ func getConfigHandler(sec *secrets.Manager, manifests map[string]*manifest.Manif
 		}
 		cfg, err := sec.Get(req.Context(), "singleton", id)
 		if err != nil {
+			phmetrics.RequestErrors.WithLabelValues(id, "config_read").Inc()
 			logger.WithError(err).WithField("plugin_id", id).Error("get config")
 			writeJSON(w, http.StatusInternalServerError, errorBody("read config failed"))
 			return
@@ -468,6 +472,7 @@ func putConfigHandler(sec *secrets.Manager, manifests map[string]*manifest.Manif
 			return
 		}
 		if err := sec.Set(req.Context(), "singleton", id, body); err != nil {
+			phmetrics.RequestErrors.WithLabelValues(id, "config_write").Inc()
 			logger.WithError(err).WithField("plugin_id", id).Error("set config")
 			writeJSON(w, http.StatusInternalServerError, errorBody("write config failed"))
 			return

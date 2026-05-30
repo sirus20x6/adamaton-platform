@@ -41,6 +41,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/sirus20x6/adamaton-core/metrics"
 )
 
 // validTag bounds what a caller may pass as ?tag=. Image tags in the
@@ -118,6 +120,10 @@ func run() error {
 	}
 
 	mux := http.NewServeMux()
+	// /metrics is intentionally unauthenticated so a Prometheus scraper can
+	// hit it without the deploy bearer token; lock it down at the ingress
+	// (Caddy) if needed. It mirrors the budget-router/webhook wiring.
+	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/services", s.requireAuth(s.handleServices))
 	mux.HandleFunc("/status", s.requireAuth(s.handleStatus))
@@ -128,9 +134,13 @@ func run() error {
 	mux.HandleFunc("/catalog", s.requireAuth(s.handleCatalog))
 	s.registerProjectEndpoints(mux)
 
+	// Wrap the mux with core/metrics.Middleware so every request increments
+	// gogents_http_requests_total{service="deploy-agent",...}. http.ServeMux
+	// has no route-template lookup like gorilla/mux, so metricsPath maps the
+	// request to a bounded, low-cardinality label (see its doc).
 	srv := &http.Server{
 		Addr:              bind,
-		Handler:           mux,
+		Handler:           metrics.Middleware("deploy-agent", metricsPath)(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	log.Printf("deploy-agent listening on %s for host=%s services=%d", bind, mf.Host, len(mf.Services))
@@ -268,13 +278,140 @@ func (s *server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"step": "up", "error": err.Error(), "output": string(upOut)})
 		return
 	}
+
+	// Verify the running container is actually on the requested tag. A
+	// `compose pull` can silently no-op when the agent's compose pull didn't
+	// land the new tag (the "ship reports accepted but service keeps the OLD
+	// image" failure mode -- see memory: deploy-agent pull quirk). Without
+	// this check the agent would happily report 200 while the old image keeps
+	// running. We read the resolved image from `compose ps` and compare its
+	// tag suffix to what was requested.
+	running, perr := s.runningImageTag(ctx, svc)
+	if perr != nil {
+		// Couldn't determine the running tag -- treat as a failure rather than
+		// claim success we can't substantiate.
+		log.Printf("restart: verify failed svc=%s tag=%s err=%v", svc, tag, perr)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"step":  "verify",
+			"error": perr.Error(),
+			"tag":   tag,
+		})
+		return
+	}
+	if running != tag {
+		log.Printf("restart: tag mismatch svc=%s requested=%s running=%s (silent pull-miss)", svc, tag, running)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"step":      "verify",
+			"error":     "running image tag does not match requested tag after pull+up (silent pull-miss)",
+			"requested": tag,
+			"running":   running,
+			"pull":      tail(string(pullOut), 50),
+			"up":        tail(string(upOut), 50),
+		})
+		return
+	}
+
 	log.Printf("restart: ok svc=%s tag=%s", svc, tag)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service": svc,
 		"tag":     tag,
+		"running": running,
 		"pull":    tail(string(pullOut), 50),
 		"up":      tail(string(upOut), 50),
 	})
+}
+
+// composePS mirrors the subset of `docker compose ps --format json` we read.
+// compose emits either a single JSON object or a JSON array depending on
+// version; newer releases stream one object per line (NDJSON). parseComposePS
+// handles all three shapes.
+type composePS struct {
+	Name    string `json:"Name"`
+	Service string `json:"Service"`
+	Image   string `json:"Image"`
+	State   string `json:"State"`
+}
+
+// runningImageTag returns the image tag of the running container for svc by
+// parsing `docker compose ps <svc> --format json`. The image ref looks like
+// "registry.example/adamaton-dashboard:sha-abc1234"; we return the substring
+// after the final ':' (the tag). Returns an error when no container is
+// running for svc or the output can't be parsed -- callers treat that as a
+// failed verification rather than a silent success.
+func (s *server) runningImageTag(ctx context.Context, svc string) (string, error) {
+	out, err := s.compose(ctx, "ps", svc, "--format", "json")
+	if err != nil {
+		return "", fmt.Errorf("compose ps %s: %w (%s)", svc, err, tail(string(out), 10))
+	}
+	entries, err := parseComposePS(out)
+	if err != nil {
+		return "", fmt.Errorf("parse compose ps for %s: %w", svc, err)
+	}
+	for _, e := range entries {
+		// Match on the compose Service name; Name is the container name which
+		// carries a project prefix + replica index.
+		if e.Service != "" && e.Service != svc {
+			continue
+		}
+		tag := imageTag(e.Image)
+		if tag == "" {
+			return "", fmt.Errorf("running container for %s has no image tag (image=%q)", svc, e.Image)
+		}
+		return tag, nil
+	}
+	return "", fmt.Errorf("no running container found for service %s", svc)
+}
+
+// parseComposePS tolerates the three shapes `docker compose ps --format json`
+// emits across versions: a JSON array, a single JSON object, or newline-
+// delimited JSON objects (one per container). Empty output yields an empty
+// slice with no error -- callers decide whether "no containers" is an error.
+func parseComposePS(out []byte) ([]composePS, error) {
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return nil, nil
+	}
+	if strings.HasPrefix(trimmed, "[") {
+		var arr []composePS
+		if err := json.Unmarshal([]byte(trimmed), &arr); err != nil {
+			return nil, err
+		}
+		return arr, nil
+	}
+	var entries []composePS
+	for _, line := range strings.Split(trimmed, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var e composePS
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, nil
+}
+
+// imageTag extracts the tag suffix from a docker image reference. It returns
+// the substring after the final ':' that follows the final '/', so a digest-
+// less registry port (e.g. "registry:5000/foo:sha-abc") doesn't fool it. An
+// image with no tag (or a bare digest) yields "".
+func imageTag(image string) string {
+	if image == "" {
+		return ""
+	}
+	// Strip any digest first ("foo:tag@sha256:...") -- we only care about tag.
+	if at := strings.IndexByte(image, '@'); at >= 0 {
+		image = image[:at]
+	}
+	lastSlash := strings.LastIndexByte(image, '/')
+	colon := strings.LastIndexByte(image, ':')
+	if colon <= lastSlash {
+		// The only ':' is in the registry host:port, not a tag separator.
+		return ""
+	}
+	return image[colon+1:]
 }
 
 // isScalable decides whether a service is allowed through /scale. v1
@@ -688,4 +825,24 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// metricsPath collapses a request URL onto a bounded set of label values for
+// the HTTP-requests metric. http.ServeMux doesn't expose the registered
+// pattern that matched, so we list our own routes explicitly. Project
+// endpoints carry path parameters (e.g. /projects/{id}/...), which would blow
+// up cardinality if labelled raw, so they all fold into the single
+// "/projects/*" bucket. Anything unrecognised becomes "other" rather than
+// leaking arbitrary paths a scanner might probe.
+func metricsPath(r *http.Request) string {
+	p := r.URL.Path
+	switch p {
+	case "/metrics", "/health", "/services", "/status", "/restart",
+		"/restart-all", "/scale", "/provision", "/catalog":
+		return p
+	}
+	if strings.HasPrefix(p, "/projects") {
+		return "/projects/*"
+	}
+	return "other"
 }

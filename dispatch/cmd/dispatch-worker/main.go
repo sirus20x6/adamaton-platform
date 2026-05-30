@@ -11,7 +11,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync/atomic"
@@ -21,8 +23,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirupsen/logrus"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 
+	"github.com/sirus20x6/adamaton-core/metrics"
 	"github.com/sirus20x6/adamaton-core/workerregistry"
 	"github.com/sirus20x6/adamaton-platform/dispatch/workerentry"
 	dispatchworkflows "github.com/sirus20x6/adamaton-platform/dispatch/workflows"
@@ -32,6 +36,7 @@ const (
 	defaultDSN       = "postgres://postgres@localhost:5432/postgres?sslmode=disable"
 	defaultTemporal  = "localhost:7233"
 	defaultNamespace = "default"
+	defaultMetrics   = ":9135"
 )
 
 func main() {
@@ -65,10 +70,20 @@ func main() {
 	}
 	defer c.Close()
 
+	// Serve /metrics so a Prometheus scraper can read the activity duration +
+	// failure counters the interceptor records. Bound to its own port
+	// (METRICS_BIND, default :9135) because the worker has no other HTTP
+	// surface. Best-effort: a metrics-port bind failure must not stop the
+	// worker from processing the queue.
+	metricsBind := envOr("METRICS_BIND", defaultMetrics)
+	go serveMetrics(metricsBind, logger)
+
 	w := worker.New(c, taskQueue, worker.Options{
 		Identity:                               "dispatch-worker",
 		MaxConcurrentActivityExecutionSize:     8,
 		MaxConcurrentWorkflowTaskExecutionSize: 16,
+		// Time every activity + count failures via core/metrics.
+		Interceptors: []interceptor.WorkerInterceptor{workerentry.Interceptor()},
 	})
 
 	// Workflow + activity registration lives in dispatch/workerentry
@@ -117,6 +132,24 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// serveMetrics runs a minimal HTTP server exposing core/metrics.Handler() at
+// /metrics. It blocks (run it in a goroutine). A bind error is logged and the
+// goroutine exits without taking the worker down — losing scrape visibility is
+// preferable to refusing to process the dispatch queue.
+func serveMetrics(addr string, logger *logrus.Logger) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.Handler())
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	logger.WithField("addr", addr).Info("dispatch-worker metrics listening")
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.WithError(err).Warn("metrics server exited")
+	}
 }
 
 func redactDSN(dsn string) string {
