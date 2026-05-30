@@ -4,7 +4,6 @@
 // already ported); the rest will be deleted. Do not extend this file --
 // new dashboard work belongs in the deepresearch frontend / platform
 // backend, not here.
-//
 package apiserver
 
 import (
@@ -57,7 +56,7 @@ type SkillInput struct {
 	Community   *string  `json:"community,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
 	DependsOn   []string `json:"depends_on,omitempty"`
-	Origin      string   `json:"origin,omitempty"`     // defaults to "manual"
+	Origin      string   `json:"origin,omitempty"` // defaults to "manual"
 	SourceURL   *string  `json:"source_url,omitempty"`
 }
 
@@ -91,9 +90,11 @@ func (s *APIServer) listSkills(w http.ResponseWriter, r *http.Request) {
 		       s.r2r_document_id, s.r2r_corpus_id, s.created_at, s.updated_at,
 		       COALESCE(u.cnt, 0) AS usage_count
 		FROM evo.skills s
-		LEFT JOIN LATERAL (
-		  SELECT COUNT(*) AS cnt FROM evo.skill_usages WHERE skill_id = s.id
-		) u ON TRUE
+		LEFT JOIN (
+		  SELECT skill_id, COUNT(*) AS cnt
+		  FROM evo.skill_usages
+		  GROUP BY skill_id
+		) u ON u.skill_id = s.id
 		WHERE 1=1
 	`)
 	args := []interface{}{}
@@ -115,7 +116,14 @@ func (s *APIServer) listSkills(w http.ResponseWriter, r *http.Request) {
 		qb.WriteString(" AND (s.name ILIKE " + placeholder(like) +
 			" OR s.description ILIKE " + placeholder(like) + ")")
 	}
-	qb.WriteString(" ORDER BY s.community NULLS LAST, s.name LIMIT 500")
+	// Bound the result set with the shared parseLimitOffset clamp so a
+	// ?limit=/?offset= here behaves identically to the other list
+	// endpoints (jobs, workers, memory, evo runs) instead of being a
+	// hard-coded 500-row wall. Default of 500 preserves prior behaviour
+	// for callers that don't pass the params.
+	limit, offset := parseLimitOffset(r, 500, 500, 100000)
+	qb.WriteString(" ORDER BY s.community NULLS LAST, s.name LIMIT " +
+		placeholder(limit) + " OFFSET " + placeholder(offset))
 
 	rows, err := s.evoPool.Query(ctx, qb.String(), args...)
 	if err != nil {
