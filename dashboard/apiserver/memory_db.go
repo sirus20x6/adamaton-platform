@@ -4,7 +4,6 @@
 // already ported); the rest will be deleted. Do not extend this file --
 // new dashboard work belongs in the deepresearch frontend / platform
 // backend, not here.
-//
 package apiserver
 
 import (
@@ -254,21 +253,83 @@ func (s *APIServer) handleMemoryInsightsDelete(w http.ResponseWriter, r *http.Re
 // ---- deepresearch entities / relationships ----
 
 // dpSchemaRE is the same allowlist r2g uses. Re-derived locally so
-// memory_db.go doesn't need to depend on r2g.
+// memory_db.go doesn't need to depend on r2g. A valid identifier starts
+// with a letter or underscore and contains only [A-Za-z0-9_] — i.e. it
+// never needs quoting and can never carry a quote, dot, semicolon, or
+// whitespace that would break out of the schema position in a query.
 var dpSchemaRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// maxIdentLen caps identifier length. Postgres truncates identifiers at
+// NAMEDATALEN-1 (63) bytes; we reject anything longer rather than let it
+// be silently truncated into a different object name than the operator
+// intended.
+const maxIdentLen = 63
+
+// validateSQLIdentifier is the single chokepoint every dynamically
+// interpolated schema/table name must pass before it can be fmt.Sprintf'd
+// into a query. Centralising it means a future copy of the Sprintf
+// pattern that forgets the inline regex guard still fails closed, because
+// the only blessed way to obtain a schema/table string is via this helper
+// (deepresearchSchema / quoteIdent below).
+func validateSQLIdentifier(kind, name string) error {
+	if name == "" {
+		return fmt.Errorf("empty %s identifier", kind)
+	}
+	if len(name) > maxIdentLen {
+		return fmt.Errorf("%s identifier too long (%d > %d): %q", kind, len(name), maxIdentLen, name)
+	}
+	if !dpSchemaRE.MatchString(name) {
+		return fmt.Errorf("unsafe %s identifier: %q", kind, name)
+	}
+	return nil
+}
+
+// quoteIdent returns a double-quoted SQL identifier for an ALREADY
+// validated name. We validate first (so an attacker-controlled value
+// fails closed) and then quote, giving defence-in-depth: even though the
+// regex guarantees the name can't contain a `"`, the quoting makes the
+// query robust against reserved words and keeps the "never raw-interpolate
+// an identifier" contract explicit at every call site. Returns an error
+// rather than panicking so callers surface a 500 instead of crashing.
+func quoteIdent(kind, name string) (string, error) {
+	if err := validateSQLIdentifier(kind, name); err != nil {
+		return "", err
+	}
+	// Defensive doubling of any embedded quote — unreachable given the
+	// regex, but keeps quoteIdent correct if the regex is ever relaxed.
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`, nil
+}
+
 // deepresearchSchema resolves R2R_PROJECT_NAME (default "deepresearch")
-// with the same regex r2g uses, so a hostile env var can't smuggle in
+// through validateSQLIdentifier, so a hostile env var can't smuggle in
 // SQL via the schema name. Caller surfaces the error.
 func deepresearchSchema() (string, error) {
 	s := os.Getenv("R2R_PROJECT_NAME")
 	if s == "" {
 		s = "deepresearch"
 	}
-	if !dpSchemaRE.MatchString(s) {
-		return "", fmt.Errorf("unsafe R2R_PROJECT_NAME: %q", s)
+	if err := validateSQLIdentifier("schema", s); err != nil {
+		// Preserve the historical error wording so operators (and tests)
+		// that grep for "unsafe R2R_PROJECT_NAME" still match, while the
+		// underlying validation is now the centralised helper.
+		return "", fmt.Errorf("unsafe R2R_PROJECT_NAME: %w", err)
 	}
 	return s, nil
+}
+
+// deepresearchQualified returns a validated, double-quoted "schema"."table"
+// reference safe to fmt.Sprintf into a query. Both halves go through the
+// identifier validator. This is the preferred helper for new call sites.
+func deepresearchQualified(schema, table string) (string, error) {
+	qs, err := quoteIdent("schema", schema)
+	if err != nil {
+		return "", err
+	}
+	qt, err := quoteIdent("table", table)
+	if err != nil {
+		return "", err
+	}
+	return qs + "." + qt, nil
 }
 
 func (s *APIServer) handleMemoryEntitiesList(w http.ResponseWriter, r *http.Request) {
@@ -591,7 +652,8 @@ func (s *APIServer) countDeepresearchTable(r *http.Request, table string) (int, 
 	if err != nil {
 		return -1, time.Time{}
 	}
-	if !dpSchemaRE.MatchString(table) {
+	qualified, err := deepresearchQualified(schema, table)
+	if err != nil {
 		return -1, time.Time{}
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
@@ -601,7 +663,7 @@ func (s *APIServer) countDeepresearchTable(r *http.Request, table string) (int, 
 		ts *time.Time
 	)
 	if err := s.evoPool.QueryRow(ctx,
-		fmt.Sprintf(`SELECT COUNT(*), MAX(updated_at) FROM %s.%s`, schema, table)).Scan(&n, &ts); err != nil {
+		fmt.Sprintf(`SELECT COUNT(*), MAX(updated_at) FROM %s`, qualified)).Scan(&n, &ts); err != nil {
 		// Schema may not exist in dev — surface -1 so the UI flags it
 		// as unavailable rather than reporting zero rows.
 		return -1, time.Time{}

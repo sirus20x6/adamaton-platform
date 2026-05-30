@@ -4,7 +4,6 @@
 // already ported); the rest will be deleted. Do not extend this file --
 // new dashboard work belongs in the deepresearch frontend / platform
 // backend, not here.
-//
 package apiserver
 
 import (
@@ -797,27 +796,95 @@ func safeJoin(root, id string) (string, error) {
 	}
 	clean := filepath.Clean(filepath.Join(root, dec))
 	rootClean := filepath.Clean(root)
-	// rel must not climb above root. We test on both the input (so a
-	// crafted ../ is rejected) and the resolved path (so a symlink
-	// pointing outside is rejected).
-	if !strings.HasPrefix(clean, rootClean+string(os.PathSeparator)) && clean != rootClean {
+	// First gate: the lexically-cleaned path must not climb above root.
+	// This rejects "../" payloads before we ever touch the filesystem.
+	if !pathWithin(clean, rootClean) {
 		return "", errors.New("path escapes root")
 	}
+	// Second gate: resolve symlinks. The old implementation only
+	// os.Readlink'd the FINAL component and then merely checked
+	// resolved != root — so (a) an intermediate directory symlink that
+	// pointed outside root was never resolved, and (b) a final-component
+	// symlink that pointed anywhere outside root (but wasn't literally
+	// root) slipped through. We now resolve the longest existing prefix
+	// of `clean` with filepath.EvalSymlinks (which follows EVERY symlink
+	// in the chain, intermediate dirs included) and require the resolved
+	// parent to remain within the resolved root.
+	resolvedRoot, err := filepath.EvalSymlinks(rootClean)
+	if err != nil {
+		// root itself doesn't exist / isn't traversable — fall back to the
+		// lexical rootClean so containment is still anchored somewhere.
+		resolvedRoot = rootClean
+	}
+	resolvedParent, err := evalSymlinksLongestPrefix(filepath.Dir(clean))
+	if err != nil {
+		return "", errors.New("resolve path: " + err.Error())
+	}
+	if !pathWithin(resolvedParent, resolvedRoot) {
+		return "", errors.New("symlink escapes root")
+	}
+	// If the final component itself is a symlink, resolve its target and
+	// re-check — a leaf symlink pointing outside root is rejected even when
+	// its parent is clean. We use os.Readlink (not EvalSymlinks) so a
+	// symlink whose TARGET doesn't exist yet is still validated: the old
+	// bug was that a leaf pointing outside root passed as long as it wasn't
+	// literally root, and EvalSymlinks would skip a dangling link entirely.
 	if target, err := os.Readlink(clean); err == nil {
-		// filepath.Join("/root", "/abs/target") returns "/root/abs/target"
-		// — useless for our containment check. Resolve absolute targets
-		// directly; relative ones are resolved against the link's dir.
-		var resolved string
+		var resolvedLeaf string
 		if filepath.IsAbs(target) {
-			resolved = filepath.Clean(target)
+			resolvedLeaf = filepath.Clean(target)
 		} else {
-			resolved = filepath.Clean(filepath.Join(filepath.Dir(clean), target))
+			resolvedLeaf = filepath.Clean(filepath.Join(resolvedParent, target))
 		}
-		if !strings.HasPrefix(resolved, rootClean+string(os.PathSeparator)) && resolved != rootClean {
+		// Fully resolve any further symlink chain on the existing prefix of
+		// the target so a leaf -> symlink -> outside chain is also caught.
+		if deep, derr := evalSymlinksLongestPrefix(resolvedLeaf); derr == nil {
+			resolvedLeaf = deep
+		}
+		if !pathWithin(resolvedLeaf, resolvedRoot) {
 			return "", errors.New("symlink escapes root")
 		}
 	}
 	return clean, nil
+}
+
+// pathWithin reports whether p is rootClean itself or a descendant of it,
+// using a separator-anchored prefix check so "/root-evil" is NOT treated
+// as being within "/root".
+func pathWithin(p, rootClean string) bool {
+	if p == rootClean {
+		return true
+	}
+	return strings.HasPrefix(p, rootClean+string(os.PathSeparator))
+}
+
+// evalSymlinksLongestPrefix resolves symlinks on the longest existing
+// ancestor of p. filepath.EvalSymlinks fails if p doesn't exist (a new
+// memory file being created lives under an existing dir but isn't itself
+// present yet), so we walk up to the first existing ancestor, resolve
+// THAT, then re-append the non-existent tail lexically. The tail can't
+// contain new symlinks (it doesn't exist on disk), so this is sound.
+func evalSymlinksLongestPrefix(p string) (string, error) {
+	p = filepath.Clean(p)
+	var tail []string
+	cur := p
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			if len(tail) == 0 {
+				return resolved, nil
+			}
+			parts := append([]string{resolved}, tail...)
+			return filepath.Clean(filepath.Join(parts...)), nil
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached the filesystem root without finding an existing
+			// ancestor — return the lexical clean as a best effort.
+			return p, nil
+		}
+		tail = append([]string{filepath.Base(cur)}, tail...)
+		cur = parent
+	}
 }
 
 func listClaudeProjects(parent string) ([]MemoryItem, error) {
