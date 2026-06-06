@@ -237,3 +237,45 @@ func claimCard(t *testing.T, s *APIServer, cardID, agent string) string {
 	require.NotEmpty(t, res.ClaimToken)
 	return res.ClaimToken
 }
+
+// TestKanbanDelete removes a card (and its comments) and is idempotent at the
+// HTTP layer: a second delete of the same id returns 404. Attaching a comment
+// first proves the in-transaction comment cleanup runs, so a card deletes
+// cleanly even if the comments FK isn't ON DELETE CASCADE.
+func TestKanbanDelete(t *testing.T) {
+	s := newDBTestServer(t)
+	fx := seedKanban(t, s.evoPool)
+
+	// Attach a comment so the delete must clear the child row first.
+	_, err := s.evoPool.Exec(context.Background(), `
+		INSERT INTO evo.kanban_comments (id, card_id, author, text)
+		VALUES ($1, $2, 'tester', 'to be removed')`,
+		"cmt-"+uuid.NewString()[:8], fx.cardID)
+	require.NoError(t, err)
+
+	// Delete -> 200 {deleted,id}.
+	rr := serveVia(s, s.registerKanbanEndpoints, http.MethodDelete,
+		"/api/v1/kanban/cards/"+fx.cardID, "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var res struct {
+		Deleted bool   `json:"deleted"`
+		ID      string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &res))
+	require.True(t, res.Deleted)
+	require.Equal(t, fx.cardID, res.ID)
+
+	// The card and its comment are both gone.
+	var cardCount, commentCount int
+	require.NoError(t, s.evoPool.QueryRow(context.Background(),
+		`SELECT count(*) FROM evo.kanban_cards WHERE id = $1`, fx.cardID).Scan(&cardCount))
+	require.Equal(t, 0, cardCount)
+	require.NoError(t, s.evoPool.QueryRow(context.Background(),
+		`SELECT count(*) FROM evo.kanban_comments WHERE card_id = $1`, fx.cardID).Scan(&commentCount))
+	require.Equal(t, 0, commentCount)
+
+	// Deleting a now-missing card -> 404.
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodDelete,
+		"/api/v1/kanban/cards/"+fx.cardID, "")
+	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
+}
