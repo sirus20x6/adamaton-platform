@@ -160,6 +160,7 @@ func (s *APIServer) registerKanbanEndpoints(api *mux.Router) {
 	api.HandleFunc("/kanban/cards/{cid}/complete", s.completeKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/release", s.releaseKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/comment", s.commentKanbanCard).Methods("POST")
+	api.HandleFunc("/kanban/cards/{cid}", s.deleteKanbanCard).Methods("DELETE")
 }
 
 // ---- boards ----------------------------------------------------------------
@@ -838,4 +839,57 @@ RETURNING id, card_id, author, text, created_at`
 		return
 	}
 	writeEvoJSONStatus(w, http.StatusCreated, cm)
+}
+
+// ---- delete ----------------------------------------------------------------
+
+// deleteKanbanCard hard-deletes a card and its comments. This is an admin /
+// cleanup operation (e.g. removing a duplicate that was filed twice). It is
+// unconditional: a claimed card is deleted along with any in-flight claim — the
+// caller is an operator/agent doing backlog hygiene, not a racing worker, so we
+// don't gate on claim_token (an unclaimed card has none anyway). Comments are
+// removed first inside the same transaction so the delete succeeds whether or
+// not evo.kanban_comments cascades on the card FK. 404 when the id doesn't
+// exist; 200 + {deleted,id} on success.
+func (s *APIServer) deleteKanbanCard(w http.ResponseWriter, r *http.Request) {
+	if s.evoPool == nil {
+		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
+		return
+	}
+	cardID := mux.Vars(r)["cid"]
+
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancel()
+
+	tx, err := s.evoPool.Begin(ctx)
+	if err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "begin: "+err.Error())
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// Remove child comments first so the card delete isn't blocked by the
+	// comments -> cards FK when it isn't declared ON DELETE CASCADE.
+	if _, err := tx.Exec(ctx, `DELETE FROM evo.kanban_comments WHERE card_id = $1`, cardID); err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "delete comments: "+err.Error())
+		return
+	}
+
+	tag, err := tx.Exec(ctx, `DELETE FROM evo.kanban_cards WHERE id = $1`, cardID)
+	if err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "delete card: "+err.Error())
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		// Nothing deleted -> the card id doesn't exist. The deferred rollback
+		// undoes the (no-op) comment delete.
+		writeEvoErr(w, http.StatusNotFound, "card not found")
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "commit: "+err.Error())
+		return
+	}
+	writeEvoJSON(w, map[string]any{"deleted": true, "id": cardID})
 }
