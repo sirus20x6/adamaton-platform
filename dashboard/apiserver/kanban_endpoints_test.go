@@ -279,3 +279,102 @@ func TestKanbanDelete(t *testing.T) {
 		"/api/v1/kanban/cards/"+fx.cardID, "")
 	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
 }
+
+// TestKanbanUpdateCard covers PATCH /kanban/cards/{cid}: field edits, the
+// unclaimed-only column reposition, and the claimed-card 409 guard.
+func TestKanbanUpdateCard(t *testing.T) {
+	s := newDBTestServer(t)
+	fx := seedKanban(t, s.evoPool)
+
+	// Partial edit of text fields leaves the column alone.
+	rr := serveVia(s, s.registerKanbanEndpoints, http.MethodPatch,
+		"/api/v1/kanban/cards/"+fx.cardID,
+		`{"title":"renamed","body":"new body","priority":"high","difficulty":"easy"}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var c Card
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &c))
+	require.Equal(t, "renamed", c.Title)
+	require.Equal(t, "new body", c.Body)
+	require.Equal(t, "high", c.Priority)
+	require.Equal(t, "easy", c.Difficulty)
+	require.Equal(t, fx.readyCol, c.ColumnID)
+
+	// Unclaimed cards can be repositioned to another column on the board.
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPatch,
+		"/api/v1/kanban/cards/"+fx.cardID,
+		`{"column_id":"`+fx.doneCol+`"}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &c))
+	require.Equal(t, fx.doneCol, c.ColumnID)
+
+	// A column from another board is rejected.
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPatch,
+		"/api/v1/kanban/cards/"+fx.cardID, `{"column_id":"col-elsewhere"}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+
+	// No fields -> 400; unknown card -> 404; empty title -> 400.
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPatch,
+		"/api/v1/kanban/cards/"+fx.cardID, `{}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPatch,
+		"/api/v1/kanban/cards/card-missing", `{"title":"x"}`)
+	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPatch,
+		"/api/v1/kanban/cards/"+fx.cardID, `{"title":"  "}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+
+	// Move the card back to ready and claim it: column changes now 409,
+	// but plain text edits still go through.
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPatch,
+		"/api/v1/kanban/cards/"+fx.cardID, `{"column_id":"`+fx.readyCol+`"}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPost,
+		"/api/v1/kanban/cards/"+fx.cardID+"/claim", `{"agent_id":"patch-tester"}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPatch,
+		"/api/v1/kanban/cards/"+fx.cardID, `{"column_id":"`+fx.doneCol+`"}`)
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPatch,
+		"/api/v1/kanban/cards/"+fx.cardID, `{"body":"still editable"}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+}
+
+// TestKanbanDeleteBoard covers DELETE /kanban/boards/{bid}: the whole
+// board subtree (columns, cards, comments) goes in one call.
+func TestKanbanDeleteBoard(t *testing.T) {
+	s := newDBTestServer(t)
+	fx := seedKanban(t, s.evoPool)
+
+	_, err := s.evoPool.Exec(context.Background(), `
+		INSERT INTO evo.kanban_comments (id, card_id, author, text)
+		VALUES ($1, $2, 'tester', 'goes with the board')`,
+		"cmt-"+uuid.NewString()[:8], fx.cardID)
+	require.NoError(t, err)
+
+	rr := serveVia(s, s.registerKanbanEndpoints, http.MethodDelete,
+		"/api/v1/kanban/boards/"+fx.boardID, "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var res struct {
+		Deleted bool   `json:"deleted"`
+		ID      string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &res))
+	require.True(t, res.Deleted)
+	require.Equal(t, fx.boardID, res.ID)
+
+	for _, q := range []string{
+		`SELECT count(*) FROM evo.kanban_boards WHERE id = '` + fx.boardID + `'`,
+		`SELECT count(*) FROM evo.kanban_columns WHERE board_id = '` + fx.boardID + `'`,
+		`SELECT count(*) FROM evo.kanban_cards WHERE board_id = '` + fx.boardID + `'`,
+		`SELECT count(*) FROM evo.kanban_comments WHERE card_id = '` + fx.cardID + `'`,
+	} {
+		var n int
+		require.NoError(t, s.evoPool.QueryRow(context.Background(), q).Scan(&n))
+		require.Equal(t, 0, n, q)
+	}
+
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodDelete,
+		"/api/v1/kanban/boards/"+fx.boardID, "")
+	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
+}

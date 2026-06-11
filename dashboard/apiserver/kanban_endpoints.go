@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -124,6 +125,16 @@ type cardCommentRequest struct {
 	Text   string `json:"text"`
 }
 
+// cardUpdateRequest is the PATCH /kanban/cards/{cid} body. Pointer fields
+// distinguish "not sent" from "set to empty" — empty strings are rejected.
+type cardUpdateRequest struct {
+	Title      *string `json:"title"`
+	Body       *string `json:"body"`
+	Priority   *string `json:"priority"`
+	Difficulty *string `json:"difficulty"`
+	ColumnID   *string `json:"column_id"`
+}
+
 // ---- response envelopes ----------------------------------------------------
 
 // boardWithColumns is the POST /boards reply and the inner shape of GET
@@ -161,6 +172,8 @@ func (s *APIServer) registerKanbanEndpoints(api *mux.Router) {
 	api.HandleFunc("/kanban/cards/{cid}/release", s.releaseKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/comment", s.commentKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}", s.deleteKanbanCard).Methods("DELETE")
+	api.HandleFunc("/kanban/cards/{cid}", s.updateKanbanCard).Methods("PATCH")
+	api.HandleFunc("/kanban/boards/{bid}", s.deleteKanbanBoard).Methods("DELETE")
 }
 
 // ---- boards ----------------------------------------------------------------
@@ -892,4 +905,169 @@ func (s *APIServer) deleteKanbanCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeEvoJSON(w, map[string]any{"deleted": true, "id": cardID})
+}
+
+// updateKanbanCard is PATCH /kanban/cards/{cid}: partial edit of a card's
+// title/body/priority/difficulty, plus an optional column_id reposition for
+// UNCLAIMED cards only — claimed cards move through /move with their claim
+// token, otherwise an editor could yank a card out from under its claimer.
+func (s *APIServer) updateKanbanCard(w http.ResponseWriter, r *http.Request) {
+	if s.evoPool == nil {
+		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
+		return
+	}
+	cardID := mux.Vars(r)["cid"]
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<18)
+	var req cardUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeEvoErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if req.Title == nil && req.Body == nil && req.Priority == nil &&
+		req.Difficulty == nil && req.ColumnID == nil {
+		writeEvoErr(w, http.StatusBadRequest, "no fields to update")
+		return
+	}
+	for name, p := range map[string]*string{
+		"title": req.Title, "priority": req.Priority,
+		"difficulty": req.Difficulty, "column_id": req.ColumnID,
+	} {
+		if p != nil {
+			*p = strings.TrimSpace(*p)
+			if *p == "" {
+				writeEvoErr(w, http.StatusBadRequest, name+" cannot be empty")
+				return
+			}
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancel()
+
+	tx, err := s.evoPool.Begin(ctx)
+	if err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "begin: "+err.Error())
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock the row so the claim/move handlers can't change claim_status or
+	// column under us between the guard checks and the UPDATE.
+	var boardID, claimStatus string
+	err = tx.QueryRow(ctx,
+		`SELECT board_id, claim_status FROM evo.kanban_cards WHERE id = $1 FOR UPDATE`,
+		cardID).Scan(&boardID, &claimStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeEvoErr(w, http.StatusNotFound, "card not found")
+		return
+	}
+	if err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "lookup: "+err.Error())
+		return
+	}
+
+	sets := []string{"updated_at = now()"}
+	args := []any{cardID}
+	arg := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	if req.Title != nil {
+		sets = append(sets, "title = "+arg(*req.Title))
+	}
+	if req.Body != nil {
+		sets = append(sets, "body = "+arg(*req.Body))
+	}
+	if req.Priority != nil {
+		sets = append(sets, "priority = "+arg(*req.Priority))
+	}
+	if req.Difficulty != nil {
+		sets = append(sets, "difficulty = "+arg(*req.Difficulty))
+	}
+	if req.ColumnID != nil {
+		if claimStatus != "unclaimed" {
+			writeEvoErr(w, http.StatusConflict,
+				"card is claimed; move it via /move with the claim token")
+			return
+		}
+		var ok bool
+		if err := tx.QueryRow(ctx,
+			"SELECT EXISTS(SELECT 1 FROM evo.kanban_columns WHERE id = $1 AND board_id = $2)",
+			*req.ColumnID, boardID).Scan(&ok); err != nil {
+			writeEvoErr(w, http.StatusInternalServerError, "column lookup: "+err.Error())
+			return
+		}
+		if !ok {
+			writeEvoErr(w, http.StatusBadRequest, "column_id does not belong to this board")
+			return
+		}
+		col := arg(*req.ColumnID)
+		sets = append(sets,
+			"column_id = "+col,
+			"position = COALESCE((SELECT MAX(position) + 1 FROM evo.kanban_cards WHERE column_id = "+col+"), 0)")
+	}
+
+	c, err := scanCard(tx.QueryRow(ctx,
+		"UPDATE evo.kanban_cards SET "+strings.Join(sets, ", ")+
+			" WHERE id = $1 RETURNING "+cardColumns, args...))
+	if err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "update card: "+err.Error())
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "commit: "+err.Error())
+		return
+	}
+	writeEvoJSON(w, c)
+}
+
+// deleteKanbanBoard is DELETE /kanban/boards/{bid}: removes the board and its
+// whole subtree. The 0017 schema declares ON DELETE CASCADE down the chain,
+// but we delete child-first inside one transaction anyway — same defensive
+// posture as deleteKanbanCard, so the handler also works against dev DBs
+// whose FKs predate the cascade.
+func (s *APIServer) deleteKanbanBoard(w http.ResponseWriter, r *http.Request) {
+	if s.evoPool == nil {
+		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
+		return
+	}
+	boardID := mux.Vars(r)["bid"]
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancel()
+
+	tx, err := s.evoPool.Begin(ctx)
+	if err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "begin: "+err.Error())
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM evo.kanban_comments
+		WHERE card_id IN (SELECT id FROM evo.kanban_cards WHERE board_id = $1)`, boardID); err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "delete comments: "+err.Error())
+		return
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM evo.kanban_cards WHERE board_id = $1`, boardID); err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "delete cards: "+err.Error())
+		return
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM evo.kanban_columns WHERE board_id = $1`, boardID); err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "delete columns: "+err.Error())
+		return
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM evo.kanban_boards WHERE id = $1`, boardID)
+	if err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "delete board: "+err.Error())
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		writeEvoErr(w, http.StatusNotFound, "board not found")
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "commit: "+err.Error())
+		return
+	}
+	writeEvoJSON(w, map[string]any{"deleted": true, "id": boardID})
 }
