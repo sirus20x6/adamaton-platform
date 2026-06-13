@@ -749,7 +749,39 @@ func (s *server) compose(ctx context.Context, args ...string) ([]byte, error) {
 	full = append(full, args...)
 	cmd := exec.CommandContext(ctx, s.composeBin, full...)
 	cmd.Dir = s.composeDir
+	cmd.Env = composeEnv()
 	return cmd.CombinedOutput()
+}
+
+// composeEnv returns the parent environment with the per-service image-tag
+// vars (ADAMATON_<SVC>_TAG) stripped out.
+//
+// The agent container is created with `env_file: [.env, image-tags.env]`, so
+// it inherits whatever ADAMATON_*_TAG values image-tags.env held AT
+// CREATE TIME. docker compose gives real environment variables precedence
+// over `--env-file`, so those stale inherited values SHADOW the freshly
+// rewritten image-tags.env that handleRestart passes with `--env-file` —
+// pinning every pull/up/ps to the agent's create-time tags no matter what a
+// /restart requests. That is the long-standing "ship reports accepted but the
+// service keeps the OLD image" pull-quirk (memory: deploy-agent pull quirk),
+// and it also made the tag-verify in handleRestart compare against the wrong
+// resolved image. Dropping these from the subprocess env lets the on-disk
+// image-tags.env (via --env-file) win, which is the whole point of rewriting
+// it. Non-tag vars (.env: WORKSTATION_IP, secrets, etc.) pass through.
+func composeEnv() []string {
+	parent := os.Environ()
+	out := make([]string, 0, len(parent))
+	for _, kv := range parent {
+		k := kv
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			k = kv[:i]
+		}
+		if strings.HasPrefix(k, "ADAMATON_") && strings.HasSuffix(k, "_TAG") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // upsertTag rewrites image-tags.env in place: replaces the line for svc
