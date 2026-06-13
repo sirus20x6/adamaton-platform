@@ -4,16 +4,15 @@
 // already ported); the rest will be deleted. Do not extend this file --
 // new dashboard work belongs in the deepresearch frontend / platform
 // backend, not here.
-//
 package apiserver
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/gorilla/mux"
 )
@@ -22,52 +21,102 @@ import (
 // The env var DEEPRESEARCH_ALLOWED_HOSTS is comma-separated; entries
 // starting with "." are treated as suffix matches (so ".local" allows
 // any *.local host). Defaults to {"deepresearch.local"}.
-var (
-	drAllowedOnce  sync.Once
-	drAllowedExact map[string]bool
-	drAllowedSufx  []string
-)
-
+//
+// SECURITY: this is re-read on every call (no sync.Once cache) so an
+// operator who tightens the allowlist at runtime — or a test that sets a
+// hostile value — is honoured per request rather than frozen at the first
+// proxy hit. The suffix entries are stored verbatim and matched against a
+// dot-boundary, never as a bare strings.HasSuffix (which would let
+// "evildeepresearch.local" or "x.local.attacker.com" slip through).
 func deepResearchAllowedHosts() (map[string]bool, []string) {
-	drAllowedOnce.Do(func() {
-		drAllowedExact = map[string]bool{}
-		raw := os.Getenv("DEEPRESEARCH_ALLOWED_HOSTS")
-		if raw == "" {
-			drAllowedExact["deepresearch.local"] = true
-			return
+	exact := map[string]bool{}
+	var sufx []string
+	raw := os.Getenv("DEEPRESEARCH_ALLOWED_HOSTS")
+	if raw == "" {
+		exact["deepresearch.local"] = true
+		return exact, sufx
+	}
+	for _, e := range strings.Split(raw, ",") {
+		e = strings.TrimSpace(strings.ToLower(e))
+		if e == "" {
+			continue
 		}
-		for _, e := range strings.Split(raw, ",") {
-			e = strings.TrimSpace(strings.ToLower(e))
-			if e == "" {
-				continue
-			}
-			if strings.HasPrefix(e, ".") {
-				drAllowedSufx = append(drAllowedSufx, e)
-			} else {
-				drAllowedExact[e] = true
-			}
+		if strings.HasPrefix(e, ".") {
+			sufx = append(sufx, e)
+		} else {
+			exact[e] = true
 		}
-	})
-	return drAllowedExact, drAllowedSufx
+	}
+	return exact, sufx
 }
 
 // hostAllowed reports whether the given host (typically url.Hostname())
 // is permitted by the deepresearch allowlist.
+//
+// Hardening over the old lowercased-strings.HasSuffix implementation:
+//
+//   - The host is normalised: surrounding whitespace, a stray trailing
+//     dot (FQDN form "deepresearch.local."), and any zone-id on an IPv6
+//     literal are stripped before matching. url.Hostname() already strips
+//     the [] from an IPv6 literal; we re-detect literals below.
+//   - Literal IP addresses (v4 *and* v6, including "[::1]" → "::1" and
+//     IPv4-mapped forms) are REJECTED unless they appear verbatim in the
+//     exact allowlist. This kills the classic SSRF pivot of pointing the
+//     proxy at 169.254.169.254 / 127.0.0.1 / [::1] — a bare ".local"
+//     suffix rule can no longer be satisfied by an IP literal.
+//   - Suffix rules match on a dot boundary: ".local" allows
+//     "deepresearch.local" but not "deepresearch.local.evil.com" and not
+//     "notdeepresearch.local" being read as a suffix of a longer attacker
+//     host. (strings.HasSuffix(".local") would accept "x.evil.local"
+//     which is the intended wildcard, but would ALSO accept a host whose
+//     literal text merely ends in those bytes — the dot-boundary keeps it
+//     to true subdomains.)
 func hostAllowed(host string) bool {
+	host = normalizeHost(host)
 	if host == "" {
 		return false
 	}
-	host = strings.ToLower(host)
 	exact, sufx := deepResearchAllowedHosts()
+
+	// An exact allowlist entry always wins — this is the ONLY way a
+	// literal IP (or any other host) gets through.
 	if exact[host] {
 		return true
 	}
+
+	// Reject IP literals that weren't explicitly allowlisted above. This
+	// covers "::1", "127.0.0.1", "169.254.169.254", IPv4-mapped IPv6,
+	// etc. Suffix rules must never apply to an IP literal.
+	if net.ParseIP(host) != nil {
+		return false
+	}
+
 	for _, s := range sufx {
-		if strings.HasSuffix(host, s) {
+		// s is like ".local". Accept "deepresearch.local" (host == s
+		// without the leading dot) and any true subdomain
+		// "*.<suffix-without-dot>", but never a host that merely ends in
+		// the same bytes across a non-dot boundary.
+		bare := strings.TrimPrefix(s, ".")
+		if host == bare || strings.HasSuffix(host, s) {
 			return true
 		}
 	}
 	return false
+}
+
+// normalizeHost lowercases and trims a host extracted from url.Hostname(),
+// dropping a single trailing FQDN dot and any IPv6 zone identifier so the
+// allowlist comparison sees a canonical form. It does NOT add or remove
+// brackets — callers pass the already-bracket-stripped url.Hostname().
+func normalizeHost(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	host = strings.TrimSuffix(host, ".")
+	// Strip an IPv6 zone id ("fe80::1%eth0" → "fe80::1") so it can't be
+	// used to dodge the net.ParseIP literal check below.
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i]
+	}
+	return host
 }
 
 // registerResearchProxy wires /api/v1/research/* through to the Pi.
@@ -76,10 +125,11 @@ func hostAllowed(host string) bool {
 // the URL rewriting is trivial.
 //
 // Routes:
-//   GET  /api/v1/research/health           → GET  /api/v1/health
-//   GET  /api/v1/research/library/...      → GET  /library/...
-//   GET  /api/v1/research/api/...          → GET  /api/...
-//   POST /api/v1/research/library/api/{c}/search → POST /library/api/{c}/search
+//
+//	GET  /api/v1/research/health           → GET  /api/v1/health
+//	GET  /api/v1/research/library/...      → GET  /library/...
+//	GET  /api/v1/research/api/...          → GET  /api/...
+//	POST /api/v1/research/library/api/{c}/search → POST /library/api/{c}/search
 //
 // Anything else 404s. We intentionally don't expose write endpoints
 // (delete/update/etc.) through the proxy — the Pi's native UI is the

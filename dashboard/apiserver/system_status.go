@@ -135,8 +135,115 @@ func (s *APIServer) checkDelegator(ctx context.Context) SubsystemStatus {
 	return st
 }
 
+// skillsCountsTTL bounds the staleness of the cached skill-library
+// aggregates. The landing page auto-refreshes every ~2s; without a cache
+// each refresh runs four full-scan COUNTs over evo.skills / evo.skill_usages
+// (a bottleneck past 100k usages). A 15s TTL means at most one of every
+// ~7 landing-page hits actually touches Postgres, and the displayed
+// numbers are never more than 15s stale.
+const skillsCountsTTL = 15 * time.Second
+
+// skillsCounts is the cached result of the four-subquery aggregate.
+type skillsCounts struct {
+	skills      int
+	communities int
+	usages      int
+	recentTasks int
+}
+
+// skillsCountsCache is a process-wide single-entry cache for checkSkills.
+// It is keyed only by time (there is exactly one skills aggregate), so a
+// single mutex-guarded slot suffices. A singleflight-style refreshing flag
+// keeps a thundering herd of concurrent /system/status calls from all
+// issuing the COUNT query at once when the entry expires; late arrivals
+// serve the (slightly) stale value instead of piling onto Postgres.
+var skillsCountsCache struct {
+	mu         sync.Mutex
+	val        skillsCounts
+	fetchedAt  time.Time
+	valid      bool
+	refreshing bool
+}
+
+// skillsCountsCacheTestReset clears the cache so tests can assert on a
+// clean miss→hit→refresh sequence without cross-test bleed.
+func skillsCountsCacheTestReset() {
+	skillsCountsCache.mu.Lock()
+	skillsCountsCache.valid = false
+	skillsCountsCache.refreshing = false
+	skillsCountsCache.fetchedAt = time.Time{}
+	skillsCountsCache.val = skillsCounts{}
+	skillsCountsCache.mu.Unlock()
+}
+
+// querySkillsCounts runs the four-subquery aggregate. Split out from
+// checkSkills so the cache can call it directly.
+func (s *APIServer) querySkillsCounts(ctx context.Context) (skillsCounts, error) {
+	subCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var c skillsCounts
+	err := s.evoPool.QueryRow(subCtx, `
+		SELECT
+			(SELECT count(*) FROM evo.skills),
+			(SELECT count(DISTINCT community) FROM evo.skills WHERE community IS NOT NULL),
+			(SELECT count(*) FROM evo.skill_usages),
+			(SELECT count(DISTINCT task_id) FROM evo.skill_usages WHERE used_at > NOW() - INTERVAL '24 hours')
+	`).Scan(&c.skills, &c.communities, &c.usages, &c.recentTasks)
+	return c, err
+}
+
+// cachedSkillsCounts returns the aggregate, refreshing through Postgres at
+// most once per skillsCountsTTL. The bool reports whether the value was
+// served from cache (true) vs freshly fetched (false) — surfaced in the
+// status stats as "cached" so operators (and the cache-hit test) can see
+// the cache working. On a query error with NO prior cached value, the
+// error propagates so checkSkills can mark the subsystem offline; on a
+// query error WITH a stale value present, the stale value is returned
+// (degraded-but-available beats a spurious offline pill).
+func (s *APIServer) cachedSkillsCounts(ctx context.Context) (skillsCounts, bool, error) {
+	c := &skillsCountsCache
+	c.mu.Lock()
+	fresh := c.valid && time.Since(c.fetchedAt) < skillsCountsTTL
+	if fresh {
+		val := c.val
+		c.mu.Unlock()
+		return val, true, nil
+	}
+	// Entry is missing or stale. If another goroutine is already
+	// refreshing and we have *some* value, serve it stale rather than
+	// dogpiling Postgres.
+	if c.refreshing && c.valid {
+		val := c.val
+		c.mu.Unlock()
+		return val, true, nil
+	}
+	c.refreshing = true
+	c.mu.Unlock()
+
+	val, err := s.querySkillsCounts(ctx)
+
+	c.mu.Lock()
+	c.refreshing = false
+	if err != nil {
+		if c.valid {
+			stale := c.val
+			c.mu.Unlock()
+			return stale, true, nil
+		}
+		c.mu.Unlock()
+		return skillsCounts{}, false, err
+	}
+	c.val = val
+	c.fetchedAt = time.Now()
+	c.valid = true
+	c.mu.Unlock()
+	return val, false, nil
+}
+
 // checkSkills: skill library summary — total skills, communities, and
 // recent usage. ok when the evo.skills tables exist + Postgres responds.
+// Backed by a short-TTL in-process cache (see cachedSkillsCounts) so the
+// landing page's ~2s refresh doesn't run four full-scan COUNTs every hit.
 func (s *APIServer) checkSkills(ctx context.Context) SubsystemStatus {
 	start := time.Now()
 	st := SubsystemStatus{Name: "skills", URL: dashboardHref("/skills")}
@@ -146,16 +253,7 @@ func (s *APIServer) checkSkills(ctx context.Context) SubsystemStatus {
 		st.LatencyMS = ms(start)
 		return st
 	}
-	subCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	var skills, communities, usages, recentTasks int
-	err := s.evoPool.QueryRow(subCtx, `
-		SELECT
-			(SELECT count(*) FROM evo.skills),
-			(SELECT count(DISTINCT community) FROM evo.skills WHERE community IS NOT NULL),
-			(SELECT count(*) FROM evo.skill_usages),
-			(SELECT count(DISTINCT task_id) FROM evo.skill_usages WHERE used_at > NOW() - INTERVAL '24 hours')
-	`).Scan(&skills, &communities, &usages, &recentTasks)
+	counts, cached, err := s.cachedSkillsCounts(ctx)
 	if err != nil {
 		st.Status = "offline"
 		st.Detail = err.Error()
@@ -164,10 +262,11 @@ func (s *APIServer) checkSkills(ctx context.Context) SubsystemStatus {
 	}
 	st.Status = "ok"
 	st.Stats = map[string]interface{}{
-		"skills":      skills,
-		"communities": communities,
-		"usages":      usages,
-		"tasks_today": recentTasks,
+		"skills":      counts.skills,
+		"communities": counts.communities,
+		"usages":      counts.usages,
+		"tasks_today": counts.recentTasks,
+		"cached":      cached,
 	}
 	st.LatencyMS = ms(start)
 	return st

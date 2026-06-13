@@ -10,7 +10,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -164,6 +166,51 @@ func (s *APIServer) listDatasets(w http.ResponseWriter, r *http.Request) {
 	writeEvoJSON(w, out)
 }
 
+// Field-validation bounds for dataset create/import. The apiserver is the
+// first line of defence: a malformed ID breaks URL routing (it becomes a
+// path segment in /datasets/{id}/...), and oversized free-text strings
+// would otherwise be forwarded to the dataset-worker unvalidated.
+const (
+	// datasetIDMaxLen keeps an ID short enough to live in a URL path and a
+	// Temporal workflow ID ("import-<id>-<ts>") without bloating either.
+	datasetIDMaxLen      = 128
+	datasetDisplayMaxLen = 256
+	datasetDescMaxLen    = 4096
+	datasetSourceRefMax  = 2048
+	datasetNotesMaxLen   = 4096
+)
+
+// datasetIDRE constrains an ID to URL-/identifier-safe characters so it
+// can be embedded in a route path and a workflow ID without escaping:
+// letters, digits, dot, underscore, and dash. No slashes (would split the
+// route), no spaces, no control chars.
+var datasetIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// validateDatasetID enforces length + charset on a dataset ID. Returns a
+// human-readable reason on failure (surfaced as a 400).
+func validateDatasetID(id string) error {
+	if id == "" {
+		return errors.New("id is required")
+	}
+	if len(id) > datasetIDMaxLen {
+		return fmt.Errorf("id too long (%d > %d chars)", len(id), datasetIDMaxLen)
+	}
+	if !datasetIDRE.MatchString(id) {
+		return errors.New("id must start with a letter or digit and contain only letters, digits, '.', '_', '-'")
+	}
+	return nil
+}
+
+// capLen returns an error if s exceeds max runes (counting bytes is fine
+// here — these are caps, not exact UTF-8 budgets, and byte length is the
+// conservative bound).
+func capLen(field, s string, max int) error {
+	if len(s) > max {
+		return fmt.Errorf("%s too long (%d > %d chars)", field, len(s), max)
+	}
+	return nil
+}
+
 // validTaskTypes mirrors the CHECK constraint on evo_datasets.datasets.task_type.
 var validTaskTypes = map[string]bool{
 	"dpo":          true,
@@ -187,13 +234,22 @@ func (s *APIServer) createDataset(w http.ResponseWriter, r *http.Request) {
 	}
 	req.ID = strings.TrimSpace(req.ID)
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
+	req.Description = strings.TrimSpace(req.Description)
 	req.TaskType = strings.TrimSpace(req.TaskType)
-	if req.ID == "" {
-		writeEvoErr(w, http.StatusBadRequest, "id is required")
+	if err := validateDatasetID(req.ID); err != nil {
+		writeEvoErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if req.DisplayName == "" {
 		req.DisplayName = req.ID
+	}
+	if err := capLen("display_name", req.DisplayName, datasetDisplayMaxLen); err != nil {
+		writeEvoErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := capLen("description", req.Description, datasetDescMaxLen); err != nil {
+		writeEvoErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	if !validTaskTypes[req.TaskType] {
 		writeEvoErr(w, http.StatusBadRequest, "task_type must be one of: dpo, sft, eval, kernel-bench, pretrain, other")
@@ -246,8 +302,12 @@ func (s *APIServer) importDataset(w http.ResponseWriter, r *http.Request) {
 	req.DatasetID = strings.TrimSpace(req.DatasetID)
 	req.SourceKind = strings.TrimSpace(req.SourceKind)
 	req.SourceRef = strings.TrimSpace(req.SourceRef)
-	if req.DatasetID == "" {
-		writeEvoErr(w, http.StatusBadRequest, "dataset_id is required")
+	req.Notes = strings.TrimSpace(req.Notes)
+	// dataset_id is interpolated into the workflow ID ("import-<id>-<ts>")
+	// and used to route — validate it the same way as create so a bad ID
+	// can't break Temporal's ID constraints or the URL surface.
+	if err := validateDatasetID(req.DatasetID); err != nil {
+		writeEvoErr(w, http.StatusBadRequest, "dataset_id: "+err.Error())
 		return
 	}
 	if !validSourceKinds[req.SourceKind] {
@@ -256,6 +316,14 @@ func (s *APIServer) importDataset(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.SourceRef == "" {
 		writeEvoErr(w, http.StatusBadRequest, "source_ref is required")
+		return
+	}
+	if err := capLen("source_ref", req.SourceRef, datasetSourceRefMax); err != nil {
+		writeEvoErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := capLen("notes", req.Notes, datasetNotesMaxLen); err != nil {
+		writeEvoErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
