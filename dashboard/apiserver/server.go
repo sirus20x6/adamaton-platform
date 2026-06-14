@@ -572,6 +572,8 @@ func (s *APIServer) setupRoutes() {
 	// Delegator (read-only quota + task views; new delegations still go
 	// through the MCP tool surface).
 	s.setupDelegatorRoutes(api)
+	// Live SSE tail of a running delegation's output (delegator_stream.go).
+	s.setupDelegatorStreamRoutes(api)
 
 	// Evo (read-only runs / programs / insights views; writes happen
 	// through evo-cli + evo-worker). Endpoints silently 503 when the
