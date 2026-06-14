@@ -25,6 +25,11 @@ type DelegationOrchestrator interface {
 // see the adapter in internal/delegator that wraps the orchestrator into
 // this interface.
 type DelegateRequestLike struct {
+	// TaskID, when non-empty, pins the task's id instead of letting the
+	// orchestrator generate one. The durable delegate_task path sets it so
+	// the caller's returned task_id equals the Temporal WorkflowID and the
+	// store row. Empty for recurring schedules (fresh id per fire).
+	TaskID      string
 	Prompt      string
 	Difficulty  string
 	Priority    string
@@ -59,6 +64,11 @@ type DelegationActivities struct {
 // supplied MCP delegate_task fields so a recurring schedule "feels" like
 // a Claude-Code-issued delegation when it fires.
 type DelegationInput struct {
+	// TaskID pins the delegation's task id when set (durable delegate_task
+	// passes the id it also uses as the Temporal WorkflowID, so the row the
+	// activity writes is the same id the caller polls). Empty for recurring
+	// schedules — each fire gets a fresh orchestrator-generated id.
+	TaskID      string `json:"task_id,omitempty"`
 	Prompt      string `json:"prompt"`
 	Difficulty  string `json:"difficulty,omitempty"`
 	Priority    string `json:"priority,omitempty"`
@@ -93,6 +103,7 @@ func (a *DelegationActivities) InvokeDelegation(ctx context.Context, in Delegati
 	}
 
 	req := DelegateRequestLike{
+		TaskID:      in.TaskID,
 		Prompt:      in.Prompt,
 		Difficulty:  in.Difficulty,
 		Priority:    in.Priority,
@@ -170,7 +181,6 @@ func isPermanentDelegationErr(err error) bool {
 	}
 	return false
 }
-
 
 // startHeartbeat fires activity.RecordHeartbeat every intervalSecs seconds
 // until the returned stop func is called. Mirrors the heartbeat-pump
