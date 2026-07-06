@@ -1,9 +1,12 @@
 name: ci
 
+# push covers all branches (not just main): pull_request-event run creation
+# is unreliable under the current Actions billing state, while push-event
+# runs dispatch fine to the self-hosted runner (verified 2026-07-06). A
+# push-event run on the PR head SHA still shows up as a check on the PR.
 on:
   pull_request:
   push:
-    branches: [main]
 
 concurrency:
   group: ci-platform-${{ github.ref }}
