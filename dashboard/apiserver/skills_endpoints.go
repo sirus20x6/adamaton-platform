@@ -63,7 +63,7 @@ type SkillInput struct {
 // registerSkillsEndpoints wires the full /api/v1/skills/* surface.
 // CRUD + import (Phase 1–3) + search/graph (Phase 4) + usages (Phase 5).
 func (s *APIServer) registerSkillsEndpoints(api *mux.Router) {
-	api.HandleFunc("/skills", s.listSkills).Methods("GET")
+	api.HandleFunc("/skills", s.withListRateLimit(s.listSkills)).Methods("GET")
 	api.HandleFunc("/skills", s.createSkill).Methods("POST")
 	api.HandleFunc("/skills/import", s.importSkillsHandler).Methods("POST")
 	api.HandleFunc("/skills/search", s.searchSkills).Methods("POST")
