@@ -367,6 +367,12 @@ func NewAPIServer(config *types.Config, logger *logrus.Logger) (*APIServer, erro
 		}
 	}
 
+	// platform.experiments / experiment_metrics live in the same Postgres
+	// as evo_datasets, so reuse the DSN. Best-effort: a migration failure
+	// just leaves /platform/experiments writes returning 503; reads keep
+	// working via PostgREST on whatever's already in the table.
+	runExperimentsMigrations(config.Postgres.DSN, logger)
+
 	// Load plugin nodes from YAML files. Paths come from EVO_PLUGIN_DIRS
 	// (colon-separated absolute paths) so the same binary works from any
 	// working directory. Without that env var, fall back to EVO_HOME's
@@ -629,6 +635,13 @@ func (s *APIServer) setupRoutes() {
 	// card-claim path the delegator MCP server drives over HTTP. Same
 	// evoPool, same 503-when-nil behaviour. See docs/PROJECTS_KANBAN.md.
 	s.registerKanbanEndpoints(api)
+
+	// Experiments — write/search/metrics surface for platform.experiments.
+	// Reads of the table itself still flow through PostgREST at /db/
+	// experiments. Mounted directly on s.router under /platform/experiments
+	// (not /api/v1) so it matches the URLs the React app already uses
+	// after the Caddy reroute off the retired backend:7272.
+	s.registerExperimentsEndpoints()
 
 	// Cross-subsystem status fan-out for the unified landing page.
 	api.HandleFunc("/system/status", s.handleSystemStatus).Methods("GET")
