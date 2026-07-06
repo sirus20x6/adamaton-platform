@@ -4,7 +4,6 @@
 // already ported); the rest will be deleted. Do not extend this file --
 // new dashboard work belongs in the deepresearch frontend / platform
 // backend, not here.
-//
 package apiserver
 
 // Job dispatch endpoints. /jobs and /jobs/{id} are read-only views over
@@ -69,7 +68,7 @@ type JobSubmitResponse struct {
 // server.go wires this into the /api/v1 subrouter alongside the other
 // registerXEndpoints calls.
 func (s *APIServer) registerJobsEndpoints(api *mux.Router) {
-	api.HandleFunc("/jobs", s.listJobs).Methods("GET")
+	api.HandleFunc("/jobs", s.withListRateLimit(s.listJobs)).Methods("GET")
 	api.HandleFunc("/jobs/submit", s.submitJob).Methods("POST")
 	api.HandleFunc("/jobs/{id}", s.getJob).Methods("GET")
 }
@@ -179,6 +178,19 @@ func (s *APIServer) getJob(w http.ResponseWriter, r *http.Request) {
 // caller of this endpoint, and the workflow uses SubmittedBy for
 // audit-style metadata.
 func (s *APIServer) submitJob(w http.ResponseWriter, r *http.Request) {
+	// Per-caller throttle BEFORE any Temporal work: a token-holding client
+	// must not be able to flood the dispatch queue and starve real work.
+	// Tunable via EVO_JOB_SUBMIT_RATE_LIMIT (rps per caller; default 0.5 =
+	// 30/min with a burst of 5). See security.go.
+	_, submitLimiter := s.limiters()
+	if !submitLimiter.allow(callerKey(r)) {
+		s.logger.WithField("caller", callerKey(r)).
+			Warn("submitJob rejected: per-caller rate limit exceeded")
+		w.Header().Set("Retry-After", "2")
+		writeEvoErr(w, http.StatusTooManyRequests, "job submission rate limit exceeded; slow down")
+		return
+	}
+
 	if s.temporalClient == nil {
 		writeEvoErr(w, http.StatusServiceUnavailable, "temporal client not configured")
 		return

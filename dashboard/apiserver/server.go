@@ -8,7 +8,6 @@ package apiserver
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -201,6 +201,25 @@ type APIServer struct {
 	// shim. Both nil when topology.yml couldn't be loaded — handlers 503.
 	fleetHealth   *health.Aggregator
 	fleetTopology *health.Topology
+	// extraAPITokens holds additional accepted API tokens beyond
+	// config.API.Token — today only the credential-keyring token when it
+	// coexists with a different env token (see auth_token.go).
+	extraAPITokens []string
+	// ticketKey/-Once back the short-lived terminal websocket tickets
+	// (terminal_ticket.go). Minted per process from crypto/rand.
+	ticketKeyOnce sync.Once
+	ticketKey     []byte
+	// Per-caller rate limiters (security.go). Lazily built so tests that
+	// construct APIServer directly still get working limits.
+	limiterOnce      sync.Once
+	listLimiter      *rateLimiter
+	jobSubmitLimiter *rateLimiter
+	// kanbanSweep aggregates stale-claim sweeper observability
+	// (kanban_sweeper.go).
+	kanbanSweep kanbanSweeperStats
+	// insightsOwnerCol flips true when evo.insights.owner exists, enabling
+	// row-level scoping on the memory insights endpoints (memory_authz.go).
+	insightsOwnerCol atomic.Bool
 }
 
 // prFetcher is the narrow slice of *gitea.GiteaClient the trigger path needs.
@@ -412,6 +431,12 @@ func NewAPIServer(config *types.Config, logger *logrus.Logger) (*APIServer, erro
 		inflightSem:    make(chan struct{}, semSize),
 	}
 
+	// Preferred API-token source: the credential keyring (decision
+	// 2026-06-12). Falls back to / coexists with the API_TOKEN env token so
+	// existing deploys (Caddy injecting Bearer {env.EVO_API_TOKEN}) keep
+	// working. See auth_token.go.
+	server.installKeyringToken(loadKeyringAPIToken(config.Postgres.DSN, logger))
+
 	// Load fleet-health topology (deploy/health/topology.yml). On failure
 	// we log a warning + leave fleetHealth nil; the /api/v1/health/*
 	// surface 503s, the SPA falls back to its degraded-pill state, and
@@ -440,6 +465,12 @@ func NewAPIServer(config *types.Config, logger *logrus.Logger) (*APIServer, erro
 	server.ReconcileTerminals(reconcileCtx)
 	reconcileCancel()
 	server.StartTerminalReaper(context.Background())
+
+	// Row-level authz support column for memory insights (best-effort; see
+	// memory_authz.go) + the observable kanban stale-claim sweeper
+	// (kanban_sweeper.go). Both no-op when evoPool is nil.
+	server.ensureInsightsOwnerColumn(context.Background())
+	server.StartKanbanSweeper(context.Background())
 
 	return server, nil
 }
@@ -635,6 +666,11 @@ func (s *APIServer) setupRoutes() {
 	// card-claim path the delegator MCP server drives over HTTP. Same
 	// evoPool, same 503-when-nil behaviour. See docs/PROJECTS_KANBAN.md.
 	s.registerKanbanEndpoints(api)
+
+	// Stale-claim sweeper observability (kanban_sweeper.go). Registered
+	// here rather than in kanban_endpoints.go to keep churn off the
+	// highest-conflict file.
+	api.HandleFunc("/kanban/sweeper/status", s.kanbanSweeperStatus).Methods("GET")
 
 	// Experiments — write/search/metrics surface for platform.experiments.
 	// Reads of the table itself still flow through PostgREST at /db/
@@ -1147,12 +1183,20 @@ func (s *APIServer) sendJSON(w http.ResponseWriter, status int, data interface{}
 }
 
 func (s *APIServer) Start(port string) error {
-	// Setup CORS
-	c := cors.New(cors.Options{
+	// Setup CORS. When the operator configured explicit origins, honour
+	// them verbatim. When NOT configured, rs/cors would default to "*" —
+	// instead we pin cross-origin browser access to the security allowlist
+	// (deepresearch.local / adamaton.local / loopback dev servers; see
+	// security.go). Same-origin requests are unaffected either way.
+	corsOpts := cors.Options{
 		AllowedOrigins: s.config.API.CORSOrigins,
-		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders: []string{"Authorization", "Content-Type", "X-API-Key"},
-	})
+		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders: []string{"Authorization", "Content-Type", "X-API-Key", "X-Agent-ID"},
+	}
+	if len(corsOpts.AllowedOrigins) == 0 {
+		corsOpts.AllowOriginFunc = corsOriginAllowed
+	}
+	c := cors.New(corsOpts)
 
 	handler := c.Handler(s.router)
 	addr := s.listenAddress(port)
@@ -1215,20 +1259,12 @@ func (s *APIServer) Start(port string) error {
 
 func (s *APIServer) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions || s.config.API.Token == "" {
+		if r.Method == http.MethodOptions || !s.authTokenConfigured() {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		token := strings.TrimSpace(r.Header.Get("X-API-Key"))
-		if token == "" {
-			auth := strings.TrimSpace(r.Header.Get("Authorization"))
-			if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-				token = strings.TrimSpace(auth[len("Bearer "):])
-			}
-		}
-
-		if subtle.ConstantTimeCompare([]byte(token), []byte(s.config.API.Token)) != 1 {
+		if !s.validAPIToken(requestHeaderToken(r)) {
 			s.sendJSON(w, http.StatusUnauthorized, APIResponse{
 				Error: "unauthorized", Success: false,
 			})

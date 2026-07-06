@@ -24,7 +24,6 @@ package apiserver
 import (
 	"bufio"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -81,6 +80,7 @@ func (s *APIServer) registerTerminalEndpoints(api *mux.Router) {
 	api.HandleFunc("/projects/{id}/terminals", s.listTerminals).Methods("GET")
 	api.HandleFunc("/projects/{id}/terminals", s.createTerminal).Methods("POST")
 	api.HandleFunc("/terminals/{sid}/ws", s.terminalWS).Methods("GET")
+	api.HandleFunc("/terminals/{sid}/ticket", s.issueTerminalTicket).Methods("POST")
 	api.HandleFunc("/terminals/{sid}/resize", s.resizeTerminal).Methods("POST")
 	api.HandleFunc("/terminals/{sid}", s.deleteTerminal).Methods("DELETE")
 }
@@ -238,14 +238,17 @@ RETURNING ` + terminalSelectCols
 	writeEvoJSONStatus(w, http.StatusCreated, t)
 }
 
-// terminalUpgrader upgrades the /terminals/{sid}/ws GET into a websocket. The
-// dashboard and the frontend dev server are same-origin via the Caddy / vite
-// /evo-api proxy, and the auth token is checked explicitly below, so we accept
-// any origin here rather than maintaining an allow-list.
+// terminalUpgrader upgrades the /terminals/{sid}/ws GET into a websocket.
+// Origin is validated against the security allowlist (security.go): the
+// dashboard + vite dev server are same-origin through the /evo-api proxy and
+// pass the same-host check; other trusted fronts (deepresearch.local,
+// adamaton.local, loopback dev ports) are allowlisted; anything else is
+// refused before the upgrade so a hostile page can't ride a user's browser
+// into a shell.
 var terminalUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
-	CheckOrigin:     func(r *http.Request) bool { return true },
+	CheckOrigin:     requestOriginAllowed,
 }
 
 func (s *APIServer) terminalWS(w http.ResponseWriter, r *http.Request) {
@@ -257,15 +260,25 @@ func (s *APIServer) terminalWS(w http.ResponseWriter, r *http.Request) {
 		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
 		return
 	}
-	// Browsers cannot set Authorization/X-API-Key headers on a WS handshake,
-	// so the token rides in the query string. Mirror authMiddleware: when a
-	// token is configured it must match; when unset, auth is disabled.
-	if !s.checkTerminalToken(r) {
-		writeEvoErr(w, http.StatusUnauthorized, "unauthorized")
+	// Reject cross-origin browsers before doing any work (the upgrader
+	// would also refuse, but this returns a clean 403 instead of a failed
+	// upgrade).
+	if !requestOriginAllowed(r) {
+		writeEvoErr(w, http.StatusForbidden, "origin not allowed")
 		return
 	}
 
 	sid := mux.Vars(r)["sid"]
+
+	// Credential check. Preferred: a short-lived ticket (minted via POST
+	// /terminals/{sid}/ticket) in ?ticket= or the adam.ticket.* subprotocol,
+	// or the API token via headers / the adam.token.* subprotocol. The
+	// legacy ?token=<api-token> query parameter still works but is
+	// deprecated (it lands in proxy logs). See terminal_ticket.go.
+	if !s.checkTerminalToken(r, sid) {
+		writeEvoErr(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 
 	// Confirm the session exists and is live before upgrading, so a bogus sid
 	// gets a clean 404 instead of a websocket that immediately dies. We also
@@ -292,7 +305,7 @@ func (s *APIServer) terminalWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := terminalUpgrader.Upgrade(w, r, nil)
+	conn, err := terminalUpgrader.Upgrade(w, r, wsResponseHeader(r))
 	if err != nil {
 		// Upgrade already wrote an error response on failure.
 		s.logger.WithError(err).Warn("terminalWS: upgrade failed")
@@ -469,7 +482,7 @@ func (s *APIServer) createRemoteTerminal(ctx context.Context, host, root string,
 	if !ok {
 		return "", errors.New("no deploy-agent URL for host " + host)
 	}
-	token := deployAgentToken()
+	token := deployAgentTokenForHost(host)
 	if token == "" {
 		return "", errors.New("DEPLOY_AGENT_TOKEN not set on dashboard")
 	}
@@ -519,7 +532,7 @@ func (s *APIServer) resizeRemoteTerminal(parent context.Context, host, sid strin
 	if !ok {
 		return
 	}
-	token := deployAgentToken()
+	token := deployAgentTokenForHost(host)
 	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
@@ -542,7 +555,7 @@ func (s *APIServer) deleteRemoteTerminal(parent context.Context, host, sid strin
 	if !ok {
 		return
 	}
-	token := deployAgentToken()
+	token := deployAgentTokenForHost(host)
 	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
@@ -557,25 +570,45 @@ func (s *APIServer) deleteRemoteTerminal(parent context.Context, host, sid strin
 	}
 }
 
-// checkTerminalToken mirrors authMiddleware for the websocket handshake, where
-// browsers can't set headers. It accepts the token via ?token=, falling back
-// to the same header check the middleware uses (so a non-browser client can
-// still send a header). When no token is configured, auth is disabled.
-func (s *APIServer) checkTerminalToken(r *http.Request) bool {
-	if s.config.API.Token == "" {
+// checkTerminalToken authorizes the websocket handshake. When no token is
+// configured, auth is disabled (mirrors authMiddleware). Otherwise it accepts,
+// in preference order:
+//
+//  1. the API token via headers (X-API-Key / Authorization: Bearer) — for
+//     non-browser clients;
+//  2. the API token or a short-lived ticket via Sec-WebSocket-Protocol
+//     entries ("adam.token.<tok>" / "adam.ticket.<tkt>") — browsers CAN set
+//     subprotocols, unlike Authorization;
+//  3. a short-lived, session-bound ticket via ?ticket= (minted by POST
+//     /terminals/{sid}/ticket; see terminal_ticket.go);
+//  4. DEPRECATED: the raw API token via ?token= — kept so the already-
+//     deployed SPA doesn't break, logged so operators can track migration.
+func (s *APIServer) checkTerminalToken(r *http.Request, sid string) bool {
+	if !s.authTokenConfigured() {
 		return true
 	}
-	token := strings.TrimSpace(r.URL.Query().Get("token"))
-	if token == "" {
-		token = strings.TrimSpace(r.Header.Get("X-API-Key"))
+	if s.validAPIToken(requestHeaderToken(r)) {
+		return true
 	}
-	if token == "" {
-		auth := strings.TrimSpace(r.Header.Get("Authorization"))
-		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-			token = strings.TrimSpace(auth[len("Bearer "):])
-		}
+	subToken, subTicket := wsSubprotocolCredential(r)
+	if subToken != "" && s.validAPIToken(subToken) {
+		return true
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(s.config.API.Token)) == 1
+	now := time.Now()
+	if subTicket != "" && s.verifyTerminalTicket(subTicket, sid, now) {
+		return true
+	}
+	if tkt := strings.TrimSpace(r.URL.Query().Get("ticket")); tkt != "" &&
+		s.verifyTerminalTicket(tkt, sid, now) {
+		return true
+	}
+	if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" &&
+		s.validAPIToken(token) {
+		s.logger.WithField("sid", sid).
+			Warn("terminal ws: DEPRECATED ?token= auth used; migrate to POST /terminals/{sid}/ticket")
+		return true
+	}
+	return false
 }
 
 // ─────────────────────────────────────────────────────────────────────

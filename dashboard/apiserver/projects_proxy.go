@@ -18,7 +18,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -26,13 +25,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// deployAgentToken returns the bearer token used to call deploy-agent /project
-// APIs. It prefers the configured API token's sibling env (DEPLOY_AGENT_TOKEN),
-// matching nodes_endpoints.go, so the dashboard authenticates to agents the
-// same way for projects and scaling.
-func deployAgentToken() string {
-	return os.Getenv("DEPLOY_AGENT_TOKEN")
-}
+// Deploy-agent bearer tokens are resolved per host via
+// deployAgentTokenForHost (security.go): DEPLOY_AGENT_TOKEN_<HOST> first,
+// falling back to the shared DEPLOY_AGENT_TOKEN so single-token deploys keep
+// working.
 
 // isLocalHost reports whether a project host string refers to the machine this
 // apiserver runs on. The empty string is local by definition (pre-0018 rows),
@@ -120,7 +116,7 @@ func (s *APIServer) proxyAgentGET(w http.ResponseWriter, r *http.Request, host, 
 			"no deploy-agent URL for host "+host+" (set ADAMATON_DEPLOY_AGENTS env)")
 		return
 	}
-	token := deployAgentToken()
+	token := deployAgentTokenForHost(host)
 	if token == "" {
 		writeEvoErr(w, http.StatusServiceUnavailable, "DEPLOY_AGENT_TOKEN not set on dashboard")
 		return
@@ -174,7 +170,7 @@ func validateOnAgent(ctx context.Context, host, path string) (*agentValidateResu
 	if !ok {
 		return nil, errors.New("no deploy-agent URL for host " + host + " (set ADAMATON_DEPLOY_AGENTS env)")
 	}
-	token := deployAgentToken()
+	token := deployAgentTokenForHost(host)
 	if token == "" {
 		return nil, errors.New("DEPLOY_AGENT_TOKEN not set on dashboard")
 	}
@@ -214,7 +210,7 @@ func dialAgentTerminalWS(ctx context.Context, host, id string) (*websocket.Conn,
 	if !ok {
 		return nil, errors.New("no deploy-agent URL for host " + host)
 	}
-	token := deployAgentToken()
+	token := deployAgentTokenForHost(host)
 	// http(s):// -> ws(s)://
 	wsURL := base + "/project/terminals/" + id + "/ws"
 	switch {
