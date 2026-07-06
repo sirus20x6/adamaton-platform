@@ -165,13 +165,27 @@ func (s *APIServer) handleMemoryInsightsCreate(w http.ResponseWriter, r *http.Re
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	row := s.evoPool.QueryRow(ctx, `
+	// Stamp the creating agent as the row owner (X-Agent-ID header; defaults
+	// to "dashboard") when the owner column is available, enabling the
+	// row-level scoping on update/delete below. See memory_authz.go.
+	var row pgx.Row
+	if s.insightsOwnerEnabled() {
+		row = s.evoPool.QueryRow(ctx, `
+		INSERT INTO evo.insights (domain, title, body, tags, owner)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, domain, title, body, tags,
+		          embedding IS NOT NULL AS has_embedding,
+		          source_program_id, created_at
+	`, in.Domain, in.Title, in.Body, in.Tags, callerAgentID(r))
+	} else {
+		row = s.evoPool.QueryRow(ctx, `
 		INSERT INTO evo.insights (domain, title, body, tags)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id, domain, title, body, tags,
 		          embedding IS NOT NULL AS has_embedding,
 		          source_program_id, created_at
 	`, in.Domain, in.Title, in.Body, in.Tags)
+	}
 	var ins MemoryInsight
 	if err := row.Scan(&ins.ID, &ins.Domain, &ins.Title, &ins.Body, &ins.Tags,
 		&ins.HasEmbedding, &ins.SourceProgramID, &ins.CreatedAt); err != nil {
@@ -203,22 +217,31 @@ func (s *APIServer) handleMemoryInsightsUpdate(w http.ResponseWriter, r *http.Re
 	// field they don't want to change. NULL-typed text/text[] needs an
 	// explicit cast or Postgres throws a "could not determine type" error
 	// the first time a row uses a column with no DEFAULT.
-	row := s.evoPool.QueryRow(ctx, `
+	//
+	// Row-level authz: when the owner column exists, only rows owned by the
+	// caller (or legacy NULL-owner rows) are updatable; admins in
+	// EVO_MEMORY_ADMIN_AGENTS bypass. See memory_authz.go.
+	q := `
 		UPDATE evo.insights SET
 		  domain = COALESCE(NULLIF($1::text, ''), domain),
 		  title  = COALESCE(NULLIF($2::text, ''), title),
 		  body   = COALESCE(NULLIF($3::text, ''), body),
 		  tags   = COALESCE($4::text[], tags)
-		WHERE id = $5
+		WHERE id = $5` + s.insightOwnerPredicate(r, 6) + `
 		RETURNING id, domain, title, body, tags,
 		          embedding IS NOT NULL AS has_embedding,
 		          source_program_id, created_at
-	`, in.Domain, in.Title, in.Body, in.Tags, id)
+	`
+	args := []interface{}{in.Domain, in.Title, in.Body, in.Tags, id}
+	if s.insightOwnerPredicate(r, 6) != "" {
+		args = append(args, callerAgentID(r))
+	}
+	row := s.evoPool.QueryRow(ctx, q, args...)
 	var ins MemoryInsight
 	if err := row.Scan(&ins.ID, &ins.Domain, &ins.Title, &ins.Body, &ins.Tags,
 		&ins.HasEmbedding, &ins.SourceProgramID, &ins.CreatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeEvoErr(w, http.StatusNotFound, "insight not found")
+			s.writeInsightMutationRefusal(w, r, id)
 			return
 		}
 		writeEvoErr(w, http.StatusInternalServerError, "update: "+err.Error())
@@ -238,16 +261,50 @@ func (s *APIServer) handleMemoryInsightsDelete(w http.ResponseWriter, r *http.Re
 	id := mux.Vars(r)["id"]
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	tag, err := s.evoPool.Exec(ctx, `DELETE FROM evo.insights WHERE id = $1`, id)
+	q := `DELETE FROM evo.insights WHERE id = $1` + s.insightOwnerPredicate(r, 2)
+	args := []interface{}{id}
+	if s.insightOwnerPredicate(r, 2) != "" {
+		args = append(args, callerAgentID(r))
+	}
+	tag, err := s.evoPool.Exec(ctx, q, args...)
 	if err != nil {
 		writeEvoErr(w, http.StatusInternalServerError, "delete: "+err.Error())
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		writeEvoErr(w, http.StatusNotFound, "insight not found")
+		s.writeInsightMutationRefusal(w, r, id)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// insightOwnerPredicate renders the row-level authz predicate appended to
+// insight mutations: rows are mutable by their owner, by anyone while owner
+// is NULL (legacy rows), and by admins (no predicate at all). argPos is the
+// placeholder index the caller binds callerAgentID(r) at. Empty string means
+// "no restriction".
+func (s *APIServer) insightOwnerPredicate(r *http.Request, argPos int) string {
+	if !s.insightsOwnerEnabled() || isMemoryAdmin(callerAgentID(r)) {
+		return ""
+	}
+	return fmt.Sprintf(" AND (owner IS NULL OR owner = $%d)", argPos)
+}
+
+// writeInsightMutationRefusal disambiguates a zero-row mutation: 404 when the
+// insight doesn't exist, 403 when it exists but is owned by another agent.
+func (s *APIServer) writeInsightMutationRefusal(w http.ResponseWriter, r *http.Request, id string) {
+	if s.insightsOwnerEnabled() {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		var exists bool
+		if err := s.evoPool.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM evo.insights WHERE id = $1)`, id).Scan(&exists); err == nil && exists {
+			writeEvoErr(w, http.StatusForbidden,
+				"forbidden: insight is owned by another agent (set X-Agent-ID or ask an admin)")
+			return
+		}
+	}
+	writeEvoErr(w, http.StatusNotFound, "insight not found")
 }
 
 // ---- deepresearch entities / relationships ----
@@ -400,6 +457,11 @@ func (s *APIServer) handleMemoryEntitiesUpdate(w http.ResponseWriter, r *http.Re
 		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
 		return
 	}
+	if !memoryGraphWriteAllowed(callerAgentID(r)) {
+		writeEvoErr(w, http.StatusForbidden,
+			"forbidden: caller not in EVO_MEMORY_DB_WRITERS allowlist")
+		return
+	}
 	schema, err := deepresearchSchema()
 	if err != nil {
 		writeEvoErr(w, http.StatusInternalServerError, err.Error())
@@ -449,6 +511,11 @@ func (s *APIServer) handleMemoryEntitiesUpdate(w http.ResponseWriter, r *http.Re
 func (s *APIServer) handleMemoryEntitiesDelete(w http.ResponseWriter, r *http.Request) {
 	if s.evoPool == nil {
 		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
+		return
+	}
+	if !memoryGraphWriteAllowed(callerAgentID(r)) {
+		writeEvoErr(w, http.StatusForbidden,
+			"forbidden: caller not in EVO_MEMORY_DB_WRITERS allowlist")
 		return
 	}
 	schema, err := deepresearchSchema()
@@ -548,6 +615,11 @@ func (s *APIServer) handleMemoryRelationshipsUpdate(w http.ResponseWriter, r *ht
 		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
 		return
 	}
+	if !memoryGraphWriteAllowed(callerAgentID(r)) {
+		writeEvoErr(w, http.StatusForbidden,
+			"forbidden: caller not in EVO_MEMORY_DB_WRITERS allowlist")
+		return
+	}
 	schema, err := deepresearchSchema()
 	if err != nil {
 		writeEvoErr(w, http.StatusInternalServerError, err.Error())
@@ -601,6 +673,11 @@ func (s *APIServer) handleMemoryRelationshipsUpdate(w http.ResponseWriter, r *ht
 func (s *APIServer) handleMemoryRelationshipsDelete(w http.ResponseWriter, r *http.Request) {
 	if s.evoPool == nil {
 		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
+		return
+	}
+	if !memoryGraphWriteAllowed(callerAgentID(r)) {
+		writeEvoErr(w, http.StatusForbidden,
+			"forbidden: caller not in EVO_MEMORY_DB_WRITERS allowlist")
 		return
 	}
 	schema, err := deepresearchSchema()

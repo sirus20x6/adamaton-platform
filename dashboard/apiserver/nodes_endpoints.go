@@ -359,7 +359,7 @@ func (s *APIServer) getNodeScalable(w http.ResponseWriter, r *http.Request) {
 	// in its catalog but that aren't in MANIFEST yet. The dialog
 	// dispatches /provision (vs /scale) for these.
 	if urls := deployAgentURLs(); urls[rack.Host] != "" {
-		token := os.Getenv("DEPLOY_AGENT_TOKEN")
+		token := deployAgentTokenForHost(rack.Host)
 		acatalog := fetchAgentCatalog(ctx, urls[rack.Host], token)
 		for _, svc := range acatalog {
 			if seen[svc] || !isScalableService(svc) {
@@ -396,7 +396,7 @@ func (s *APIServer) postNodeProvision(w http.ResponseWriter, r *http.Request) {
 			"no deploy-agent URL for host "+rack.Host+" (set ADAMATON_DEPLOY_AGENTS env)")
 		return
 	}
-	token := os.Getenv("DEPLOY_AGENT_TOKEN")
+	token := deployAgentTokenForHost(rack.Host)
 	if token == "" {
 		writeEvoErr(w, http.StatusServiceUnavailable, "DEPLOY_AGENT_TOKEN not set on dashboard")
 		return
@@ -466,7 +466,7 @@ func (s *APIServer) postNodeScale(w http.ResponseWriter, r *http.Request) {
 			"no deploy-agent URL for host "+rack.Host+" (set ADAMATON_DEPLOY_AGENTS env)")
 		return
 	}
-	token := os.Getenv("DEPLOY_AGENT_TOKEN")
+	token := deployAgentTokenForHost(rack.Host)
 	if token == "" {
 		writeEvoErr(w, http.StatusServiceUnavailable, "DEPLOY_AGENT_TOKEN not set on dashboard")
 		return

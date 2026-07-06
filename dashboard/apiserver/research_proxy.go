@@ -154,6 +154,16 @@ func (s *APIServer) registerResearchProxy(api *mux.Router) {
 }
 
 func (s *APIServer) proxyDeepResearch(w http.ResponseWriter, r *http.Request, stripPrefix string) {
+	// Browser Origin guard: the CORS layer only vets origins it is asked
+	// about via preflight; simple GETs from a hostile page still reach the
+	// handler. Refuse cross-origin browsers that aren't on the allowlist so
+	// the dashboard can't be used as a CORS-bypassing proxy onto the Pi.
+	if !requestOriginAllowed(r) {
+		s.logger.WithField("origin", r.Header.Get("Origin")).
+			Warn("research proxy: rejecting disallowed Origin")
+		writeEvoErr(w, http.StatusForbidden, "origin not allowed")
+		return
+	}
 	base := s.deepResearchURL()
 	if base == "" {
 		writeEvoErr(w, http.StatusServiceUnavailable, "deepresearch URL not configured")

@@ -80,7 +80,7 @@ type DatasetImportResponse struct {
 
 func (s *APIServer) registerDatasetsEndpoints(api *mux.Router) {
 	// Read.
-	api.HandleFunc("/datasets", s.listDatasets).Methods("GET")
+	api.HandleFunc("/datasets", s.withListRateLimit(s.listDatasets)).Methods("GET")
 	api.HandleFunc("/datasets/{id}", s.getDataset).Methods("GET")
 	api.HandleFunc("/datasets/{id}/quality", s.listQualityForDataset).Methods("GET")
 	api.HandleFunc("/datasets/versions/{version_id}", s.getDatasetVersion).Methods("GET")

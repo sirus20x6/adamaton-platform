@@ -77,6 +77,10 @@ type server struct {
 	token      string
 	mu         sync.Mutex // serialises every docker compose op
 	composeBin string     // "docker" so we can `docker compose ...`
+	// mutateLimiter throttles the mutating endpoints (/restart,
+	// /restart-all, /scale, /provision) per caller BEFORE the compose
+	// mutex, so a flood can't starve legitimate deploys (ratelimit.go).
+	mutateLimiter *rateLimiter
 }
 
 func main() {
@@ -112,11 +116,12 @@ func run() error {
 	}
 
 	s := &server{
-		composeDir: composeDir,
-		manifest:   mf,
-		allowed:    allow,
-		token:      token,
-		composeBin: "docker",
+		composeDir:    composeDir,
+		manifest:      mf,
+		allowed:       allow,
+		token:         token,
+		composeBin:    "docker",
+		mutateLimiter: newMutateLimiter(),
 	}
 
 	mux := http.NewServeMux()
@@ -127,10 +132,12 @@ func run() error {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/services", s.requireAuth(s.handleServices))
 	mux.HandleFunc("/status", s.requireAuth(s.handleStatus))
-	mux.HandleFunc("/restart", s.requireAuth(s.handleRestart))
-	mux.HandleFunc("/restart-all", s.requireAuth(s.handleRestartAll))
-	mux.HandleFunc("/scale", s.requireAuth(s.handleScale))
-	mux.HandleFunc("/provision", s.requireAuth(s.handleProvision))
+	// Mutating endpoints get a per-caller throttle (after auth, before the
+	// compose mutex) — see ratelimit.go.
+	mux.HandleFunc("/restart", s.requireAuth(s.rateLimited(s.handleRestart)))
+	mux.HandleFunc("/restart-all", s.requireAuth(s.rateLimited(s.handleRestartAll)))
+	mux.HandleFunc("/scale", s.requireAuth(s.rateLimited(s.handleScale)))
+	mux.HandleFunc("/provision", s.requireAuth(s.rateLimited(s.handleProvision)))
 	mux.HandleFunc("/catalog", s.requireAuth(s.handleCatalog))
 	s.registerProjectEndpoints(mux)
 
