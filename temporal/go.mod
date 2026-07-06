@@ -6,11 +6,12 @@ require (
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/prometheus/client_golang v1.23.2
 	github.com/sirupsen/logrus v1.9.4
+	github.com/sirus20x6/adamaton-core v0.0.0
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
-	github.com/sirus20x6/adamaton-core v0.0.0
 	go.temporal.io/api v1.62.11
 	go.temporal.io/sdk v1.43.0
 )
@@ -27,6 +28,9 @@ require (
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.2 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.22.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nexus-rpc/sdk-go v0.6.0 // indirect
@@ -59,20 +63,19 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-
 replace (
 	github.com/sirus20x6/adamaton-core => ../../core
-	github.com/sirus20x6/adamaton-knowledge/skills => ../../knowledge/skills
-	github.com/sirus20x6/adamaton-knowledge/skills-rae => ../../knowledge/skills-rae
-	github.com/sirus20x6/adamaton-knowledge/reindex => ../../knowledge/reindex
-	github.com/sirus20x6/adamaton-knowledge/r2g => ../../knowledge/r2g
 	github.com/sirus20x6/adamaton-deepresearch/nano-research => ../../deepresearch/nano-research
 	github.com/sirus20x6/adamaton-delegator/delegator => ../../delegator/delegator
 	github.com/sirus20x6/adamaton-delegator/mcp => ../../delegator/mcp
 	github.com/sirus20x6/adamaton-evolve/evolve => ../../evolve/evolve
 	github.com/sirus20x6/adamaton-evolve/workflow-builder => ../../evolve/workflow-builder
+	github.com/sirus20x6/adamaton-knowledge/r2g => ../../knowledge/r2g
+	github.com/sirus20x6/adamaton-knowledge/reindex => ../../knowledge/reindex
+	github.com/sirus20x6/adamaton-knowledge/skills => ../../knowledge/skills
+	github.com/sirus20x6/adamaton-knowledge/skills-rae => ../../knowledge/skills-rae
 	github.com/sirus20x6/adamaton-platform/dashboard => ../../platform/dashboard
-	github.com/sirus20x6/adamaton-platform/plugin-host => ../../platform/plugin-host
 	github.com/sirus20x6/adamaton-platform/dispatch => ../../platform/dispatch
+	github.com/sirus20x6/adamaton-platform/plugin-host => ../../platform/plugin-host
 	github.com/sirus20x6/adamaton-platform/temporal => ../../platform/temporal
 )
