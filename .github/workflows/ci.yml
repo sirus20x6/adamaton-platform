@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-platform-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: platform
+
+      # Sibling checkouts: platform/<module>/go.mod uses relative replaces
+      # (../../core, ../../knowledge/r2g, ...) that resolve against this layout.
+      - uses: actions/checkout@v4
+        with:
+          repository: sirus20x6/adamaton-core
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: core
+      - uses: actions/checkout@v4
+        with:
+          repository: sirus20x6/adamaton-deepresearch
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: deepresearch
+      - uses: actions/checkout@v4
+        with:
+          repository: sirus20x6/adamaton-delegator
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: delegator
+      - uses: actions/checkout@v4
+        with:
+          repository: sirus20x6/adamaton-evolve
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: evolve
+      - uses: actions/checkout@v4
+        with:
+          repository: sirus20x6/adamaton-knowledge
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: knowledge
+      # ztok is only needed for module resolution (knowledge/r2g replaces
+      # ztok-go => ../../ztok/bindings/go); its C library is never compiled
+      # by platform's package graph, so a plain source checkout suffices.
+      - uses: actions/checkout@v4
+        with:
+          repository: sirus20x6/ztok
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: ztok
+
+      - name: vet, build, and test all modules
+        env:
+          GOGENTS_SKIP_DOCKER_TESTS: "1"
+          GOFLAGS: -mod=mod
+        run: |
+          cd platform
+          find . -name go.mod -not -path '*/vendor/*' -not -path '*/node_modules/*' -not -path '*worktrees*' | while read -r m; do
+            d=$(dirname "$m")
+            echo "== $d"
+            (cd "$d" && GOWORK=off go vet ./... && GOWORK=off go build ./... && GOWORK=off go test ./...) || exit 1
+          done
