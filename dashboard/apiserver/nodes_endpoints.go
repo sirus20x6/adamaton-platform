@@ -41,6 +41,8 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+
+	"github.com/sirus20x6/adamaton-core/tracectx"
 )
 
 // scaleResponseShape lines up with the deploy-agent's /scale JSON.
@@ -136,7 +138,7 @@ func fetchAgentCatalog(ctx context.Context, baseURL, token string) []string {
 		return nil
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := tracectx.Client(3 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil
@@ -422,7 +424,7 @@ func (s *APIServer) postNodeProvision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := tracectx.Client(5 * time.Minute)
 	resp, err := client.Do(req)
 	if err != nil {
 		writeEvoErr(w, http.StatusBadGateway, "deploy-agent unreachable: "+err.Error())
@@ -493,7 +495,7 @@ func (s *APIServer) postNodeScale(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := tracectx.Client(5 * time.Minute)
 	resp, err := client.Do(req)
 	if err != nil {
 		writeEvoErr(w, http.StatusBadGateway, "deploy-agent unreachable: "+err.Error())

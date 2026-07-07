@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sirus20x6/adamaton-core/tracectx"
 )
 
 // osGetenv is a tiny indirection that exists so tests can intercept
@@ -598,7 +600,7 @@ func (s *APIServer) deepResearchHTTPClient() *http.Client {
 		tr := &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureTLS},
 		}
-		drClient = &http.Client{Transport: tr, Timeout: 10 * time.Second}
+		drClient = &http.Client{Transport: tracectx.NewTransport(tr), Timeout: 10 * time.Second}
 	})
 	return drClient
 }
