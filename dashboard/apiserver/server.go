@@ -34,6 +34,7 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"github.com/sirus20x6/adamaton-core/metrics"
+	"github.com/sirus20x6/adamaton-core/tracectx"
 	"github.com/sirus20x6/adamaton-core/types"
 	"github.com/sirus20x6/adamaton-delegator/delegator"
 	"github.com/sirus20x6/adamaton-delegator/delegator/llm"
@@ -574,6 +575,13 @@ func (s *APIServer) setupRoutes() {
 	// itself is also counted (this is fine — its cardinality is bounded by
 	// the path label below).
 	s.router.Use(metrics.Middleware("apiserver", s.metricsPathLabel))
+
+	// W3C trace-context: extract/start a trace per request and stash it on
+	// the request context; outbound calls made with tracectx.Client (or a
+	// tracectx.Transport) forward it, so apiserver→deploy-agent and
+	// apiserver→deepresearch/r2g hops share one trace id. The middleware
+	// echoes X-Trace-Id on responses for curl-level correlation.
+	s.router.Use(tracectx.Middleware)
 
 	api := s.router.PathPrefix("/api/v1").Subrouter()
 	api.Use(s.authMiddleware)

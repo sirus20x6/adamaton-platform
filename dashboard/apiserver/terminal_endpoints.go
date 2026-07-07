@@ -37,6 +37,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 	"github.com/sirus20x6/adamaton-core/projectfs"
+	"github.com/sirus20x6/adamaton-core/tracectx"
 )
 
 // terminalsEnabled reports whether the tmux backend is active (PTY_BACKEND !=
@@ -499,7 +500,7 @@ func (s *APIServer) createRemoteTerminal(ctx context.Context, host, root string,
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 12 * time.Second}).Do(httpReq)
+	resp, err := tracectx.Client(12 * time.Second).Do(httpReq)
 	if err != nil {
 		return "", err
 	}
@@ -542,7 +543,7 @@ func (s *APIServer) resizeRemoteTerminal(parent context.Context, host, sid strin
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
+	resp, err := tracectx.Client(8 * time.Second).Do(req)
 	if err == nil {
 		resp.Body.Close()
 	}
@@ -564,7 +565,7 @@ func (s *APIServer) deleteRemoteTerminal(parent context.Context, host, sid strin
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
+	resp, err := tracectx.Client(8 * time.Second).Do(req)
 	if err == nil {
 		resp.Body.Close()
 	}

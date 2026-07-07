@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/sirus20x6/adamaton-core/tracectx"
 )
 
 // Deploy-agent bearer tokens are resolved per host via
@@ -134,7 +136,7 @@ func (s *APIServer) proxyAgentGET(w http.ResponseWriter, r *http.Request, host, 
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := tracectx.Client(30 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		writeEvoErr(w, http.StatusBadGateway, "deploy-agent unreachable: "+err.Error())
@@ -181,7 +183,7 @@ func validateOnAgent(ctx context.Context, host, path string) (*agentValidateResu
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := tracectx.Client(10 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, errAgentUnreachable
