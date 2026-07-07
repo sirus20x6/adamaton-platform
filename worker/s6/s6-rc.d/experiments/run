@@ -1,0 +1,3 @@
+#!/command/execlineb -P
+with-contenv
+/usr/local/bin/adamaton-worker --queue=experiments
