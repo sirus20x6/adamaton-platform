@@ -26,6 +26,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/sirus20x6/adamaton-platform/temporal/activities"
+	"github.com/sirus20x6/adamaton-platform/temporal/errclass"
 )
 
 // TaskQueueTrainExperiment is the Temporal task queue this workflow uses.
@@ -153,6 +154,11 @@ func TrainExperimentWorkflow(ctx workflow.Context, in TrainExperimentInput) (*Tr
 		StderrTail:     dispatch.StderrTail,
 	}
 	if dispatchErr != nil {
+		workflow.GetLogger(ctx).Error("TrainExperimentWorkflow failed",
+			"experiment_id", in.ExperimentID,
+			"error", dispatchErr,
+			"error_class", errclass.RecordWorkflowFailure(ctx, "TrainExperimentWorkflow", dispatchErr),
+		)
 		return out, dispatchErr
 	}
 	return out, nil

@@ -7,6 +7,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/sirus20x6/adamaton-platform/temporal/activities"
+	"github.com/sirus20x6/adamaton-platform/temporal/errclass"
 )
 
 // DelegationWorkflow runs a single CLI delegation through the
@@ -34,7 +35,10 @@ func DelegationWorkflow(ctx workflow.Context, in activities.DelegationInput) (*a
 	var a *activities.DelegationActivities // method receiver used only for type inference
 	err := workflow.ExecuteActivity(ctx, a.InvokeDelegation, in).Get(ctx, &out)
 	if err != nil {
-		logger.Warn("DelegationWorkflow activity failed", "error", err)
+		logger.Warn("DelegationWorkflow activity failed",
+			"error", err,
+			"error_class", errclass.RecordWorkflowFailure(ctx, "DelegationWorkflow", err),
+		)
 		return out, err
 	}
 	logger.Info("DelegationWorkflow done", "task_id", out.TaskID, "status", out.Status)

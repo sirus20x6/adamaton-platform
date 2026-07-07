@@ -450,6 +450,11 @@ func NewAPIServer(config *types.Config, logger *logrus.Logger) (*APIServer, erro
 		// would belong in a future Shutdown path; today the process
 		// exit takes the goroutine with it.
 		go agg.Start(context.Background())
+		// Temporal task-queue depth gauge: poll DescribeTaskQueue for
+		// every temporal_queue role's declared queue and publish
+		// gogents_temporal_task_queue_depth on /metrics. Same lifecycle
+		// rationale as the aggregator loop above.
+		server.startQueueDepthPoller(context.Background(), topo)
 	}
 
 	server.setupRoutes()

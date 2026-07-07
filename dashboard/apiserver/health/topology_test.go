@@ -199,3 +199,46 @@ capabilities:
 		t.Fatal("optional flag not preserved")
 	}
 }
+
+func TestTopology_TemporalQueues(t *testing.T) {
+	body := `
+roles:
+  skills-worker:
+    kind: temporal_queue
+    queue: skills
+    min_healthy: 1
+    heartbeat_max_age: 90s
+  skills-worker-b:
+    kind: temporal_queue
+    queue: skills
+    min_healthy: 0
+    heartbeat_max_age: 90s
+  dispatch-worker:
+    kind: temporal_queue
+    queue: dispatch
+    min_healthy: 1
+    heartbeat_max_age: 90s
+  r2g:
+    kind: http
+    min_healthy: 1
+    probe: {port: 7373, path: /healthz}
+capabilities:
+  ops:
+    label: Ops
+    roles: [skills-worker]
+`
+	topo, err := LoadTopology(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("LoadTopology: %v", err)
+	}
+	got := topo.TemporalQueues()
+	want := []string{"dispatch", "skills"}
+	if len(got) != len(want) {
+		t.Fatalf("TemporalQueues() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("TemporalQueues()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

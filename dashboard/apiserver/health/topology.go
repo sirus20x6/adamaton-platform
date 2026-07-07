@@ -177,6 +177,25 @@ func (t *Topology) validateCapability(c Capability) error {
 	return nil
 }
 
+// TemporalQueues returns the deduplicated, sorted set of Temporal task
+// queue names declared by temporal_queue roles. Used by the apiserver's
+// queue-depth poller to know which queues to DescribeTaskQueue.
+func (t *Topology) TemporalQueues() []string {
+	seen := map[string]bool{}
+	for _, name := range t.RoleOrder {
+		role := t.Roles[name]
+		if role.Kind == KindTemporalQueue && role.Queue != "" {
+			seen[role.Queue] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for q := range seen {
+		out = append(out, q)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func kindAllowed(k Kind) bool {
 	for _, ok := range allKinds {
 		if k == ok {

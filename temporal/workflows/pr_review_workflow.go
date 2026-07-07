@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/sirus20x6/adamaton-platform/temporal/activities"
+	"github.com/sirus20x6/adamaton-platform/temporal/errclass"
 	"github.com/sirus20x6/adamaton-platform/temporal/gitea"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
@@ -311,7 +312,23 @@ func notificationActivityOptions() workflow.ActivityOptions {
 // skipped entirely and not counted toward the pass/fail tally. When
 // args.Agents.Configured is false (the historical default for callers that
 // have not been updated to populate per-agent toggles), every agent runs.
+//
+// This exported function is a thin failure-tagging wrapper: on a terminal
+// error it stamps the low-cardinality error_class (errclass.Classify) on
+// both the failure metric and the log line, then returns the error
+// unchanged. The orchestration body lives in prReviewWorkflowImpl.
 func PRReviewWorkflow(ctx workflow.Context, args PRReviewArgs) error {
+	err := prReviewWorkflowImpl(ctx, args)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("PRReviewWorkflow failed",
+			"error", err,
+			"error_class", errclass.RecordWorkflowFailure(ctx, "PRReviewWorkflow", err),
+		)
+	}
+	return err
+}
+
+func prReviewWorkflowImpl(ctx workflow.Context, args PRReviewArgs) error {
 	// Configure activity options with extended timeouts for enhanced analysis.
 	// Read-only / idempotent activities get the default policy with retries.
 	// State-mutating activities (Merge, Comment) override below at their call
@@ -684,7 +701,20 @@ func executeDecision(ctx workflow.Context, args PRReviewArgs, decision ReviewDec
 // (the LLM analysis path is upstream-agnostic) but documented here because
 // future work to add Gitea-native check activities should not silently
 // rewire the dispatch.
+// Like PRReviewWorkflow, the exported function is a thin failure-tagging
+// wrapper around the orchestration body (giteaPRReviewWorkflowImpl).
 func GiteaPRReviewWorkflow(ctx workflow.Context, args PRReviewArgs) error {
+	err := giteaPRReviewWorkflowImpl(ctx, args)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("GiteaPRReviewWorkflow failed",
+			"error", err,
+			"error_class", errclass.RecordWorkflowFailure(ctx, "GiteaPRReviewWorkflow", err),
+		)
+	}
+	return err
+}
+
+func giteaPRReviewWorkflowImpl(ctx workflow.Context, args PRReviewArgs) error {
 	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
 
 	var diff string
