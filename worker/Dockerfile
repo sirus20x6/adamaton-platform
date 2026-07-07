@@ -20,6 +20,15 @@
 #   --build-arg GO_TAGS="skills reindex dispatch evo"      --target=runtime-full
 #   --build-arg GO_TAGS="evo"                              --target=runtime-gpu
 #
+# experiments note: the `experiments-train` launch queue (see
+# cmd/adamaton-worker/reg_experiments.go) rides with `evo` — any GO_TAGS
+# set that includes `evo` (the FULL/pi5 and GPU/blackwell variants) is
+# automatically expanded to also compile in `experiments`, both for the
+# go build tags and the s6 contents.d service set. Passing `experiments`
+# explicitly in GO_TAGS also works. The queue still only RUNS where
+# WORKER_QUEUES selects it and a Postgres DSN (EVO_POSTGRES_DSN or
+# POSTGRES_DSN) is provided; setup fails fast otherwise.
+#
 # At runtime, WORKER_QUEUES (comma-separated) selects which of the
 # compiled-in queues actually run — s6-overlay supervises one
 # process per queue.
@@ -71,13 +80,21 @@ COPY platform ./platform
 # CGO_ENABLED=1; build the ztok binding with -tags nopkgconfig and point cgo
 # at the cross-built libztok via CGO_CFLAGS/CGO_LDFLAGS. For arm64, drive the
 # cross C compiler (the Go compiler itself still runs natively on amd64).
+# experiments rides with evo (see header note): the TAGS expansion below
+# adds `experiments` whenever `evo` is tagged, so the FULL/GPU variants
+# compile in the experiments-train launch queue.
 RUN set -eux; \
     CC=gcc; \
     if [ "${TARGETARCH}" = "arm64" ]; then CC=aarch64-linux-gnu-gcc; fi; \
+    TAGS="${GO_TAGS}"; \
+    case " ${TAGS} " in \
+      *" experiments "*) ;; \
+      *" evo "*) TAGS="${TAGS} experiments" ;; \
+    esac; \
     CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH} CC="$CC" \
     CGO_CFLAGS="-I/opt/ztok/include" \
     CGO_LDFLAGS="-L/opt/ztok/lib" \
-    go build -tags "nopkgconfig ${GO_TAGS}" -trimpath -ldflags='-s -w' \
+    go build -tags "nopkgconfig ${TAGS}" -trimpath -ldflags='-s -w' \
     -o /out/adamaton-worker ./platform/worker/cmd/adamaton-worker
 
 # --- s6-base ----------------------------------------------------------------
@@ -118,15 +135,23 @@ RUN chmod +x /entrypoint.sh
 # script below. WORKER_QUEUES filtering happens in /entrypoint.sh
 # BEFORE handing off to /init, by pruning contents.d/ entries the
 # operator excluded.
+# The TAGS expansion mirrors the builder stage's evo -> experiments tag
+# expansion so the s6 service set matches what the binary compiled in.
 RUN set -eux; \
     contents=/etc/s6-overlay/s6-rc.d/user/contents.d; \
     rm -f "$contents"/.gitkeep "$contents"/.keep; \
-    for tag in ${GO_TAGS}; do \
+    TAGS="${GO_TAGS}"; \
+    case " ${TAGS} " in \
+      *" experiments "*) ;; \
+      *" evo "*) TAGS="${TAGS} experiments" ;; \
+    esac; \
+    for tag in ${TAGS}; do \
       case "$tag" in \
-        skills)   touch "$contents/skills" ;; \
-        reindex)  touch "$contents/reindex-ingest" "$contents/reindex-extract" ;; \
-        dispatch) touch "$contents/dispatch" ;; \
-        evo)      touch "$contents/evo" ;; \
+        skills)      touch "$contents/skills" ;; \
+        reindex)     touch "$contents/reindex-ingest" "$contents/reindex-extract" ;; \
+        dispatch)    touch "$contents/dispatch" ;; \
+        evo)         touch "$contents/evo" ;; \
+        experiments) touch "$contents/experiments" ;; \
         *) echo "unknown GO_TAGS entry: $tag" >&2; exit 1 ;; \
       esac; \
     done; \

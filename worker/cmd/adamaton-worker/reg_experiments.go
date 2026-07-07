@@ -31,13 +31,25 @@ func init() {
 }
 
 func setupExperiments(b *bootCtx) (*queueRuntime, error) {
-	dsn := coreboot.ResolveDSN(
-		[]string{"EVO_POSTGRES_DSN", "POSTGRES_DSN"},
-		"postgres://postgres@localhost:5432/postgres?sslmode=disable",
-	)
+	// The launch queue is useless without the experiments tables, so
+	// require an explicit DSN instead of silently falling back to a
+	// localhost default that doesn't exist inside the worker
+	// containers. s6 restarts the process, so failing fast here turns
+	// a misconfigured deployment into a visible crash loop rather than
+	// a worker that polls Temporal but errors every activity.
+	dsn := coreboot.ResolveDSN([]string{"EVO_POSTGRES_DSN", "POSTGRES_DSN"}, "")
+	if dsn == "" {
+		return nil, fmt.Errorf("experiments queue requires EVO_POSTGRES_DSN or POSTGRES_DSN to be set")
+	}
 	pool, err := pgxpool.New(b.Ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open evo postgres pool: %w", err)
+	}
+	// pgxpool.New is lazy; verify the DSN actually reaches a database
+	// before registering with Temporal.
+	if err := pool.Ping(b.Ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping experiments postgres: %w", err)
 	}
 
 	// Modest concurrency. Dispatch activities are long-lived (training
