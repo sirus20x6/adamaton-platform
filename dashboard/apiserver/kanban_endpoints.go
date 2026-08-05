@@ -87,6 +87,15 @@ type Comment struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// CardLink represents relationships between cards. For dependency hierarchy,
+// source_card_id blocks target_card_id; the target depends on the source.
+type CardLink struct {
+	SourceCardID string    `json:"source_card_id"`
+	TargetCardID string    `json:"target_card_id"`
+	LinkType     string    `json:"link_type"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
 // ---- request bodies --------------------------------------------------------
 
 type boardCreateRequest struct {
@@ -126,9 +135,17 @@ type cardArchiveDoneRequest struct {
 	OlderThanDays *int `json:"older_than_days"`
 }
 
+type cardReleaseStaleRequest struct {
+	OlderThanMinutes *int `json:"older_than_minutes"`
+}
+
 type cardCommentRequest struct {
 	Author string `json:"author"`
 	Text   string `json:"text"`
+}
+
+type cardDependencyRequest struct {
+	DependsOnCardID string `json:"depends_on_card_id"`
 }
 
 // cardUpdateRequest is the PATCH /kanban/cards/{cid} body. Pointer fields
@@ -146,9 +163,11 @@ type cardUpdateRequest struct {
 // boardWithColumns is the POST /boards reply and the inner shape of GET
 // /boards/{bid} (which also carries cards).
 type boardDetail struct {
-	Board   Board    `json:"board"`
-	Columns []Column `json:"columns"`
-	Cards   []Card   `json:"cards,omitempty"`
+	Board    Board      `json:"board"`
+	Columns  []Column   `json:"columns"`
+	Cards    []Card     `json:"cards,omitempty"`
+	Comments []Comment  `json:"comments,omitempty"`
+	Links    []CardLink `json:"links,omitempty"`
 }
 
 // claimResult is the /claim reply: the (now claimed) card plus the capability
@@ -173,13 +192,17 @@ func (s *APIServer) registerKanbanEndpoints(api *mux.Router) {
 	api.HandleFunc("/kanban/boards/{bid}/cards", s.createKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/boards/{bid}/ready", s.listReadyCards).Methods("GET")
 	api.HandleFunc("/kanban/boards/{bid}/archive-done", s.archiveDoneKanbanCards).Methods("POST")
+	api.HandleFunc("/kanban/boards/{bid}/release-stale", s.releaseStaleKanbanCards).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/claim", s.claimKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/move", s.moveKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/complete", s.completeKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/release", s.releaseKanbanCard).Methods("POST")
+	api.HandleFunc("/kanban/cards/{cid}/reopen", s.reopenKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/archive", s.archiveKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/restore", s.restoreKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/comment", s.commentKanbanCard).Methods("POST")
+	api.HandleFunc("/kanban/cards/{cid}/dependencies", s.addKanbanCardDependency).Methods("POST")
+	api.HandleFunc("/kanban/cards/{cid}/dependencies/{dep}", s.deleteKanbanCardDependency).Methods("DELETE")
 	api.HandleFunc("/kanban/cards/{cid}", s.deleteKanbanCard).Methods("DELETE")
 	api.HandleFunc("/kanban/cards/{cid}", s.updateKanbanCard).Methods("PATCH")
 	api.HandleFunc("/kanban/boards/{bid}", s.deleteKanbanBoard).Methods("DELETE")
@@ -330,6 +353,24 @@ WHERE board_id = $1
   AND ($2::boolean OR archived_at IS NULL)
 ORDER BY position ASC, created_at ASC`
 
+const boardCommentsSQL = `
+SELECT cm.id, cm.card_id, cm.author, cm.text, cm.created_at
+FROM evo.kanban_comments cm
+JOIN evo.kanban_cards card ON card.id = cm.card_id
+WHERE card.board_id = $1
+  AND ($2::boolean OR card.archived_at IS NULL)
+ORDER BY cm.created_at ASC`
+
+const boardLinksSQL = `
+SELECT l.source_card_id, l.target_card_id, l.link_type, l.created_at
+FROM evo.kanban_card_links l
+JOIN evo.kanban_cards target ON target.id = l.target_card_id
+JOIN evo.kanban_cards source ON source.id = l.source_card_id
+WHERE target.board_id = $1
+  AND source.board_id = $1
+  AND ($2::boolean OR (target.archived_at IS NULL AND source.archived_at IS NULL))
+ORDER BY l.created_at ASC`
+
 func (s *APIServer) getKanbanBoard(w http.ResponseWriter, r *http.Request) {
 	if s.evoPool == nil {
 		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
@@ -393,7 +434,47 @@ func (s *APIServer) getKanbanBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeEvoJSON(w, boardDetail{Board: b, Columns: cols, Cards: cards})
+	commentRows, err := s.evoPool.Query(ctx, boardCommentsSQL, boardID, includeArchived)
+	if err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "comments: "+err.Error())
+		return
+	}
+	defer commentRows.Close()
+	comments := make([]Comment, 0)
+	for commentRows.Next() {
+		var cm Comment
+		if err := commentRows.Scan(&cm.ID, &cm.CardID, &cm.Author, &cm.Text, &cm.CreatedAt); err != nil {
+			writeEvoErr(w, http.StatusInternalServerError, "scan comment: "+err.Error())
+			return
+		}
+		comments = append(comments, cm)
+	}
+	if err := commentRows.Err(); err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "comments rows: "+err.Error())
+		return
+	}
+
+	linkRows, err := s.evoPool.Query(ctx, boardLinksSQL, boardID, includeArchived)
+	if err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "links: "+err.Error())
+		return
+	}
+	defer linkRows.Close()
+	links := make([]CardLink, 0)
+	for linkRows.Next() {
+		var link CardLink
+		if err := linkRows.Scan(&link.SourceCardID, &link.TargetCardID, &link.LinkType, &link.CreatedAt); err != nil {
+			writeEvoErr(w, http.StatusInternalServerError, "scan link: "+err.Error())
+			return
+		}
+		links = append(links, link)
+	}
+	if err := linkRows.Err(); err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "links rows: "+err.Error())
+		return
+	}
+
+	writeEvoJSON(w, boardDetail{Board: b, Columns: cols, Cards: cards, Comments: comments, Links: links})
 }
 
 // ---- cards -----------------------------------------------------------------
@@ -503,6 +584,14 @@ WHERE board_id = $1
   AND archived_at IS NULL
   AND claim_status = 'unclaimed'
   AND column_id IN (SELECT id FROM evo.kanban_columns WHERE board_id = $1 AND is_ready = true)
+  AND NOT EXISTS (
+      SELECT 1
+      FROM evo.kanban_card_links l
+      JOIN evo.kanban_cards blocker ON blocker.id = l.source_card_id
+      WHERE l.target_card_id = evo.kanban_cards.id
+        AND l.link_type = 'blocks'
+        AND blocker.claim_status <> 'done'
+  )
 ORDER BY position ASC, created_at ASC`
 
 func (s *APIServer) listReadyCards(w http.ResponseWriter, r *http.Request) {
@@ -586,6 +675,14 @@ SET claim_status = 'claimed',
     updated_at   = now()
 WHERE id = $1 AND claim_status = 'unclaimed'
   AND archived_at IS NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM evo.kanban_card_links l
+      JOIN evo.kanban_cards blocker ON blocker.id = l.source_card_id
+      WHERE l.target_card_id = evo.kanban_cards.id
+        AND l.link_type = 'blocks'
+        AND blocker.claim_status <> 'done'
+  )
 RETURNING ` + cardColumns + `, claim_token`
 	var c Card
 	var token string
@@ -606,6 +703,18 @@ RETURNING ` + cardColumns + `, claim_token`
 			}
 			if archivedAt != nil {
 				writeEvoErr(w, http.StatusConflict, "card is archived")
+				return
+			}
+			var blocked bool
+			if e := tx.QueryRow(ctx, `
+SELECT EXISTS(
+	SELECT 1
+	FROM evo.kanban_card_links l
+	JOIN evo.kanban_cards blocker ON blocker.id = l.source_card_id
+	WHERE l.target_card_id = $1
+	  AND l.link_type = 'blocks'
+	  AND blocker.claim_status <> 'done')`, cardID).Scan(&blocked); e == nil && blocked {
+				writeEvoErr(w, http.StatusConflict, "card is blocked by incomplete dependencies")
 				return
 			}
 			writeEvoErr(w, http.StatusConflict, "card already claimed")
@@ -832,6 +941,72 @@ RETURNING ` + cardColumns
 	writeEvoJSON(w, c)
 }
 
+// reopenKanbanCard moves completed or failed work back to the board's Ready
+// column as unclaimed work while preserving prior result metadata for audit.
+func (s *APIServer) reopenKanbanCard(w http.ResponseWriter, r *http.Request) {
+	if s.evoPool == nil {
+		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
+		return
+	}
+	cardID := mux.Vars(r)["cid"]
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancel()
+
+	const reopenSQL = `
+UPDATE evo.kanban_cards
+SET claim_status = 'unclaimed',
+    claimed_by   = NULL,
+    claim_token  = NULL,
+    claimed_at   = NULL,
+    column_id    = (
+        SELECT id FROM evo.kanban_columns
+        WHERE board_id = evo.kanban_cards.board_id AND is_ready = true
+        ORDER BY position ASC LIMIT 1),
+    position     = COALESCE((
+        SELECT MAX(position) + 1 FROM evo.kanban_cards inner_c
+        WHERE inner_c.column_id = (
+            SELECT id FROM evo.kanban_columns
+            WHERE board_id = evo.kanban_cards.board_id AND is_ready = true
+            ORDER BY position ASC LIMIT 1)
+          AND inner_c.archived_at IS NULL), 0),
+    updated_at   = now()
+WHERE id = $1
+  AND claim_status IN ('done', 'failed')
+  AND archived_at IS NULL
+RETURNING ` + cardColumns
+	c, err := scanCard(s.evoPool.QueryRow(ctx, reopenSQL, cardID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			var status string
+			var archivedAt *time.Time
+			lookupErr := s.evoPool.QueryRow(ctx,
+				`SELECT claim_status, archived_at FROM evo.kanban_cards WHERE id = $1`,
+				cardID).Scan(&status, &archivedAt)
+			if errors.Is(lookupErr, pgx.ErrNoRows) {
+				writeEvoErr(w, http.StatusNotFound, "card not found")
+				return
+			}
+			if lookupErr != nil {
+				writeEvoErr(w, http.StatusInternalServerError, "card lookup: "+lookupErr.Error())
+				return
+			}
+			if archivedAt != nil {
+				writeEvoErr(w, http.StatusConflict, "card is archived")
+				return
+			}
+			writeEvoErr(w, http.StatusConflict, "only completed or failed cards can be reopened")
+			return
+		}
+		writeEvoErr(w, http.StatusInternalServerError, "reopen: "+err.Error())
+		return
+	}
+	if c.ColumnID == "" {
+		writeEvoErr(w, http.StatusConflict, "board has no ready column")
+		return
+	}
+	writeEvoJSON(w, c)
+}
+
 // archiveKanbanCard soft-archives a completed card. It intentionally refuses
 // active work: archive is for completed backlog hygiene, while delete remains
 // the explicit destructive cleanup path.
@@ -961,6 +1136,57 @@ WHERE board_id = $1
 	})
 }
 
+// releaseStaleKanbanCards is an operator bulk action for stuck agent work. It
+// clears claims older than the requested threshold so ready work can be picked
+// up again without requiring each stale claim token.
+func (s *APIServer) releaseStaleKanbanCards(w http.ResponseWriter, r *http.Request) {
+	if s.evoPool == nil {
+		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
+		return
+	}
+	boardID := mux.Vars(r)["bid"]
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	var req cardReleaseStaleRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeEvoErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+			return
+		}
+	}
+	olderThanMinutes := 30
+	if req.OlderThanMinutes != nil {
+		olderThanMinutes = *req.OlderThanMinutes
+	}
+	if olderThanMinutes < 1 {
+		writeEvoErr(w, http.StatusBadRequest, "older_than_minutes must be positive")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+
+	const releaseSQL = `
+UPDATE evo.kanban_cards
+SET claim_status = 'unclaimed',
+    claimed_by   = NULL,
+    claim_token  = NULL,
+    claimed_at   = NULL,
+    updated_at   = now()
+WHERE board_id = $1
+  AND claim_status = 'claimed'
+  AND archived_at IS NULL
+  AND claimed_at < now() - ($2 * INTERVAL '1 minute')`
+	tag, err := s.evoPool.Exec(ctx, releaseSQL, boardID, olderThanMinutes)
+	if err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "release stale: "+err.Error())
+		return
+	}
+	writeEvoJSON(w, map[string]any{
+		"released": tag.RowsAffected(),
+		"board_id": boardID,
+	})
+}
+
 // ---- comments --------------------------------------------------------------
 
 func (s *APIServer) commentKanbanCard(w http.ResponseWriter, r *http.Request) {
@@ -1008,6 +1234,87 @@ RETURNING id, card_id, author, text, created_at`
 	writeEvoJSONStatus(w, http.StatusCreated, cm)
 }
 
+// ---- dependencies ----------------------------------------------------------
+
+func (s *APIServer) addKanbanCardDependency(w http.ResponseWriter, r *http.Request) {
+	if s.evoPool == nil {
+		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
+		return
+	}
+	cardID := mux.Vars(r)["cid"]
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	var req cardDependencyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeEvoErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	req.DependsOnCardID = strings.TrimSpace(req.DependsOnCardID)
+	if req.DependsOnCardID == "" {
+		writeEvoErr(w, http.StatusBadRequest, "depends_on_card_id is required")
+		return
+	}
+	if req.DependsOnCardID == cardID {
+		writeEvoErr(w, http.StatusBadRequest, "card cannot depend on itself")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancel()
+
+	var sameBoard bool
+	if err := s.evoPool.QueryRow(ctx, `
+SELECT EXISTS(
+	SELECT 1
+	FROM evo.kanban_cards target
+	JOIN evo.kanban_cards source ON source.board_id = target.board_id
+	WHERE target.id = $1 AND source.id = $2)`, cardID, req.DependsOnCardID).Scan(&sameBoard); err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "card lookup: "+err.Error())
+		return
+	}
+	if !sameBoard {
+		writeEvoErr(w, http.StatusBadRequest, "dependency card must exist on the same board")
+		return
+	}
+
+	var link CardLink
+	const insertSQL = `
+INSERT INTO evo.kanban_card_links (source_card_id, target_card_id, link_type)
+VALUES ($1, $2, 'blocks')
+ON CONFLICT (source_card_id, target_card_id, link_type) DO UPDATE
+SET created_at = evo.kanban_card_links.created_at
+RETURNING source_card_id, target_card_id, link_type, created_at`
+	if err := s.evoPool.QueryRow(ctx, insertSQL, req.DependsOnCardID, cardID).Scan(
+		&link.SourceCardID, &link.TargetCardID, &link.LinkType, &link.CreatedAt); err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "insert dependency: "+err.Error())
+		return
+	}
+	writeEvoJSONStatus(w, http.StatusCreated, link)
+}
+
+func (s *APIServer) deleteKanbanCardDependency(w http.ResponseWriter, r *http.Request) {
+	if s.evoPool == nil {
+		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
+		return
+	}
+	cardID := mux.Vars(r)["cid"]
+	depID := mux.Vars(r)["dep"]
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancel()
+
+	tag, err := s.evoPool.Exec(ctx, `
+DELETE FROM evo.kanban_card_links
+WHERE source_card_id = $1 AND target_card_id = $2 AND link_type = 'blocks'`, depID, cardID)
+	if err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "delete dependency: "+err.Error())
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		writeEvoErr(w, http.StatusNotFound, "dependency not found")
+		return
+	}
+	writeEvoJSON(w, map[string]any{"deleted": true, "card_id": cardID, "depends_on_card_id": depID})
+}
+
 // ---- delete ----------------------------------------------------------------
 
 // deleteKanbanCard hard-deletes a card and its comments. This is an admin /
@@ -1037,6 +1344,12 @@ func (s *APIServer) deleteKanbanCard(w http.ResponseWriter, r *http.Request) {
 
 	// Remove child comments first so the card delete isn't blocked by the
 	// comments -> cards FK when it isn't declared ON DELETE CASCADE.
+	if _, err := tx.Exec(ctx, `
+DELETE FROM evo.kanban_card_links
+WHERE source_card_id = $1 OR target_card_id = $1`, cardID); err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "delete links: "+err.Error())
+		return
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM evo.kanban_comments WHERE card_id = $1`, cardID); err != nil {
 		writeEvoErr(w, http.StatusInternalServerError, "delete comments: "+err.Error())
 		return
@@ -1201,6 +1514,13 @@ func (s *APIServer) deleteKanbanBoard(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(ctx)
 
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM evo.kanban_card_links
+		WHERE source_card_id IN (SELECT id FROM evo.kanban_cards WHERE board_id = $1)
+		   OR target_card_id IN (SELECT id FROM evo.kanban_cards WHERE board_id = $1)`, boardID); err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "delete links: "+err.Error())
+		return
+	}
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM evo.kanban_comments
 		WHERE card_id IN (SELECT id FROM evo.kanban_cards WHERE board_id = $1)`, boardID); err != nil {

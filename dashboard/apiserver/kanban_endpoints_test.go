@@ -304,6 +304,99 @@ func TestKanbanArchive_rejectsActiveCardsAndBulkArchivesDone(t *testing.T) {
 	require.NotNil(t, archivedAt)
 }
 
+func TestKanbanDependenciesBlockReadyAndClaim(t *testing.T) {
+	s := newDBTestServer(t)
+	fx := seedKanban(t, s.evoPool)
+	ctx := context.Background()
+
+	blockerID := "card-" + uuid.NewString()[:8]
+	_, err := s.evoPool.Exec(ctx, `
+		INSERT INTO evo.kanban_cards (id, column_id, board_id, title, body, priority, difficulty, position)
+		VALUES ($1, $2, $3, 'dependency', 'blocks target', 'normal', 'medium', 1)`,
+		blockerID, fx.readyCol, fx.boardID)
+	require.NoError(t, err)
+
+	rr := serveVia(s, s.registerKanbanEndpoints, http.MethodPost,
+		"/api/v1/kanban/cards/"+fx.cardID+"/dependencies",
+		fmt.Sprintf(`{"depends_on_card_id":%q}`, blockerID))
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var link CardLink
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &link))
+	require.Equal(t, blockerID, link.SourceCardID)
+	require.Equal(t, fx.cardID, link.TargetCardID)
+
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodGet,
+		"/api/v1/kanban/boards/"+fx.boardID, "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var detail boardDetail
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &detail))
+	require.Len(t, detail.Links, 1)
+
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodGet,
+		"/api/v1/kanban/boards/"+fx.boardID+"/ready", "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var ready []Card
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &ready))
+	for _, card := range ready {
+		require.NotEqual(t, fx.cardID, card.ID, "blocked card is not agent-ready")
+	}
+
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPost,
+		"/api/v1/kanban/cards/"+fx.cardID+"/claim", `{"agent_id":"blocked-agent"}`)
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "blocked")
+
+	token := claimCard(t, s, blockerID, "dependency-agent")
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPost,
+		"/api/v1/kanban/cards/"+blockerID+"/complete",
+		fmt.Sprintf(`{"claim_token":%q,"result_summary":"dependency done"}`, token))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPost,
+		"/api/v1/kanban/cards/"+fx.cardID+"/claim", `{"agent_id":"unblocked-agent"}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+}
+
+func TestKanbanReleaseStaleAndReopen(t *testing.T) {
+	s := newDBTestServer(t)
+	fx := seedKanban(t, s.evoPool)
+
+	token := claimCard(t, s, fx.cardID, "stale-agent")
+	_, err := s.evoPool.Exec(context.Background(),
+		`UPDATE evo.kanban_cards SET claimed_at = now() - INTERVAL '45 minutes' WHERE id = $1`,
+		fx.cardID)
+	require.NoError(t, err)
+
+	rr := serveVia(s, s.registerKanbanEndpoints, http.MethodPost,
+		"/api/v1/kanban/boards/"+fx.boardID+"/release-stale", `{"older_than_minutes":30}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var release struct {
+		Released int64  `json:"released"`
+		BoardID  string `json:"board_id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &release))
+	require.Equal(t, int64(1), release.Released)
+
+	var status string
+	require.NoError(t, s.evoPool.QueryRow(context.Background(),
+		`SELECT claim_status FROM evo.kanban_cards WHERE id = $1`, fx.cardID).Scan(&status))
+	require.Equal(t, "unclaimed", status)
+
+	token = claimCard(t, s, fx.cardID, "review-agent")
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPost,
+		"/api/v1/kanban/cards/"+fx.cardID+"/complete",
+		fmt.Sprintf(`{"claim_token":%q,"result_summary":"needs review"}`, token))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPost,
+		"/api/v1/kanban/cards/"+fx.cardID+"/reopen", "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var reopened Card
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &reopened))
+	require.Equal(t, "unclaimed", reopened.ClaimStatus)
+	require.Equal(t, fx.readyCol, reopened.ColumnID)
+}
+
 // claimCard claims a card via the real handler and returns the token.
 func claimCard(t *testing.T, s *APIServer, cardID, agent string) string {
 	t.Helper()
