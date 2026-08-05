@@ -225,6 +225,85 @@ func TestKanbanComplete_requiresClaimToken(t *testing.T) {
 	require.Equal(t, "shipped", *done.ResultSummary)
 }
 
+func TestKanbanArchive_completedCardsAreHiddenByDefault(t *testing.T) {
+	s := newDBTestServer(t)
+	fx := seedKanban(t, s.evoPool)
+	token := claimCard(t, s, fx.cardID, "archiver")
+
+	rr := serveVia(s, s.registerKanbanEndpoints, http.MethodPost,
+		"/api/v1/kanban/cards/"+fx.cardID+"/complete",
+		fmt.Sprintf(`{"claim_token":%q,"result_summary":"ready to archive"}`, token))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPost,
+		"/api/v1/kanban/cards/"+fx.cardID+"/archive", "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var archived Card
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &archived))
+	require.NotNil(t, archived.ArchivedAt)
+
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodGet,
+		"/api/v1/kanban/boards/"+fx.boardID, "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var hidden boardDetail
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &hidden))
+	require.Empty(t, hidden.Cards, "archived cards stay out of the default board view")
+
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodGet,
+		"/api/v1/kanban/boards/"+fx.boardID+"?include_archived=true", "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var included boardDetail
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &included))
+	require.Len(t, included.Cards, 1)
+	require.NotNil(t, included.Cards[0].ArchivedAt)
+
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPost,
+		"/api/v1/kanban/cards/"+fx.cardID+"/restore", "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var restored Card
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &restored))
+	require.Nil(t, restored.ArchivedAt)
+
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodGet,
+		"/api/v1/kanban/boards/"+fx.boardID, "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &hidden))
+	require.Len(t, hidden.Cards, 1)
+}
+
+func TestKanbanArchive_rejectsActiveCardsAndBulkArchivesDone(t *testing.T) {
+	s := newDBTestServer(t)
+	fx := seedKanban(t, s.evoPool)
+
+	rr := serveVia(s, s.registerKanbanEndpoints, http.MethodPost,
+		"/api/v1/kanban/cards/"+fx.cardID+"/archive", "")
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "only completed cards can be archived")
+
+	token := claimCard(t, s, fx.cardID, "bulk-archiver")
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPost,
+		"/api/v1/kanban/cards/"+fx.cardID+"/complete",
+		fmt.Sprintf(`{"claim_token":%q,"result_summary":"done"}`, token))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	rr = serveVia(s, s.registerKanbanEndpoints, http.MethodPost,
+		"/api/v1/kanban/boards/"+fx.boardID+"/archive-done", `{"older_than_days":0}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var res struct {
+		Archived int64  `json:"archived"`
+		BoardID  string `json:"board_id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &res))
+	require.Equal(t, int64(1), res.Archived)
+	require.Equal(t, fx.boardID, res.BoardID)
+
+	var archivedAt *string
+	require.NoError(t, s.evoPool.QueryRow(context.Background(),
+		`SELECT archived_at::text FROM evo.kanban_cards WHERE id = $1`, fx.cardID).
+		Scan(&archivedAt))
+	require.NotNil(t, archivedAt)
+}
+
 // claimCard claims a card via the real handler and returns the token.
 func claimCard(t *testing.T, s *APIServer, cardID, agent string) string {
 	t.Helper()

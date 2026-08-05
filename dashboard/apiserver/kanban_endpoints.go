@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -72,6 +73,7 @@ type Card struct {
 	ResultTaskID  *string    `json:"result_task_id,omitempty"`
 	ResultSummary *string    `json:"result_summary,omitempty"`
 	ResultPRURL   *string    `json:"result_pr_url,omitempty"`
+	ArchivedAt    *time.Time `json:"archived_at,omitempty"`
 	CreatedAt     time.Time  `json:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at"`
 }
@@ -120,6 +122,10 @@ type cardReleaseRequest struct {
 	ClaimToken string `json:"claim_token"`
 }
 
+type cardArchiveDoneRequest struct {
+	OlderThanDays *int `json:"older_than_days"`
+}
+
 type cardCommentRequest struct {
 	Author string `json:"author"`
 	Text   string `json:"text"`
@@ -156,7 +162,7 @@ type claimResult struct {
 
 const cardColumns = `id, column_id, board_id, title, body, priority, difficulty,
 	position, claim_status, claimed_by, claimed_at, result_task_id,
-	result_summary, result_pr_url, created_at, updated_at`
+	result_summary, result_pr_url, archived_at, created_at, updated_at`
 
 // ---- registration ----------------------------------------------------------
 
@@ -166,10 +172,13 @@ func (s *APIServer) registerKanbanEndpoints(api *mux.Router) {
 	api.HandleFunc("/kanban/boards/{bid}", s.getKanbanBoard).Methods("GET")
 	api.HandleFunc("/kanban/boards/{bid}/cards", s.createKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/boards/{bid}/ready", s.listReadyCards).Methods("GET")
+	api.HandleFunc("/kanban/boards/{bid}/archive-done", s.archiveDoneKanbanCards).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/claim", s.claimKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/move", s.moveKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/complete", s.completeKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/release", s.releaseKanbanCard).Methods("POST")
+	api.HandleFunc("/kanban/cards/{cid}/archive", s.archiveKanbanCard).Methods("POST")
+	api.HandleFunc("/kanban/cards/{cid}/restore", s.restoreKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}/comment", s.commentKanbanCard).Methods("POST")
 	api.HandleFunc("/kanban/cards/{cid}", s.deleteKanbanCard).Methods("DELETE")
 	api.HandleFunc("/kanban/cards/{cid}", s.updateKanbanCard).Methods("PATCH")
@@ -318,6 +327,7 @@ const boardCardsSQL = `
 SELECT ` + cardColumns + `
 FROM evo.kanban_cards
 WHERE board_id = $1
+  AND ($2::boolean OR archived_at IS NULL)
 ORDER BY position ASC, created_at ASC`
 
 func (s *APIServer) getKanbanBoard(w http.ResponseWriter, r *http.Request) {
@@ -361,7 +371,9 @@ func (s *APIServer) getKanbanBoard(w http.ResponseWriter, r *http.Request) {
 	}
 	colRows.Close()
 
-	cardRows, err := s.evoPool.Query(ctx, boardCardsSQL, boardID)
+	includeArchived := r.URL.Query().Get("include_archived") == "1" ||
+		strings.EqualFold(r.URL.Query().Get("include_archived"), "true")
+	cardRows, err := s.evoPool.Query(ctx, boardCardsSQL, boardID, includeArchived)
 	if err != nil {
 		writeEvoErr(w, http.StatusInternalServerError, "cards: "+err.Error())
 		return
@@ -395,7 +407,7 @@ func scanCard(row rowScanner) (Card, error) {
 	err := row.Scan(
 		&c.ID, &c.ColumnID, &c.BoardID, &c.Title, &c.Body, &c.Priority, &c.Difficulty,
 		&c.Position, &c.ClaimStatus, &c.ClaimedBy, &c.ClaimedAt, &c.ResultTaskID,
-		&c.ResultSummary, &c.ResultPRURL, &c.CreatedAt, &c.UpdatedAt,
+		&c.ResultSummary, &c.ResultPRURL, &c.ArchivedAt, &c.CreatedAt, &c.UpdatedAt,
 	)
 	return c, err
 }
@@ -469,7 +481,7 @@ LIMIT 1`
 INSERT INTO evo.kanban_cards
 	(id, column_id, board_id, title, body, priority, difficulty, position)
 VALUES ($1, $2, $3, $4, $5, $6, $7,
-	COALESCE((SELECT MAX(position) + 1 FROM evo.kanban_cards WHERE column_id = $2), 0))
+	COALESCE((SELECT MAX(position) + 1 FROM evo.kanban_cards WHERE column_id = $2 AND archived_at IS NULL), 0))
 RETURNING ` + cardColumns
 	c, err := scanCard(s.evoPool.QueryRow(ctx, insertCardSQL,
 		cardID, req.ColumnID, boardID, req.Title, req.Body, req.Priority, req.Difficulty))
@@ -488,6 +500,7 @@ const readyCardsSQL = `
 SELECT ` + cardColumns + `
 FROM evo.kanban_cards
 WHERE board_id = $1
+  AND archived_at IS NULL
   AND claim_status = 'unclaimed'
   AND column_id IN (SELECT id FROM evo.kanban_columns WHERE board_id = $1 AND is_ready = true)
 ORDER BY position ASC, created_at ASC`
@@ -572,21 +585,27 @@ SET claim_status = 'claimed',
     claimed_at   = now(),
     updated_at   = now()
 WHERE id = $1 AND claim_status = 'unclaimed'
+  AND archived_at IS NULL
 RETURNING ` + cardColumns + `, claim_token`
 	var c Card
 	var token string
 	err = tx.QueryRow(ctx, claimSQL, cardID, req.AgentID).Scan(
 		&c.ID, &c.ColumnID, &c.BoardID, &c.Title, &c.Body, &c.Priority, &c.Difficulty,
 		&c.Position, &c.ClaimStatus, &c.ClaimedBy, &c.ClaimedAt, &c.ResultTaskID,
-		&c.ResultSummary, &c.ResultPRURL, &c.CreatedAt, &c.UpdatedAt, &token,
+		&c.ResultSummary, &c.ResultPRURL, &c.ArchivedAt, &c.CreatedAt, &c.UpdatedAt, &token,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Either the card doesn't exist or it's already claimed.
 			// Disambiguate so the caller gets 404 vs 409.
 			var exists bool
-			if e := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM evo.kanban_cards WHERE id = $1)", cardID).Scan(&exists); e == nil && !exists {
+			var archivedAt *time.Time
+			if e := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM evo.kanban_cards WHERE id = $1), (SELECT archived_at FROM evo.kanban_cards WHERE id = $1)", cardID).Scan(&exists, &archivedAt); e == nil && !exists {
 				writeEvoErr(w, http.StatusNotFound, "card not found")
+				return
+			}
+			if archivedAt != nil {
+				writeEvoErr(w, http.StatusConflict, "card is archived")
 				return
 			}
 			writeEvoErr(w, http.StatusConflict, "card already claimed")
@@ -607,15 +626,20 @@ RETURNING ` + cardColumns + `, claim_token`
 // missing, is claimed but the token is absent/wrong. A token is only required
 // when the card is actually claimed; an unclaimed card can be moved freely.
 func (s *APIServer) requireClaimToken(ctx context.Context, w http.ResponseWriter, cardID, token string) bool {
-	const sql = `SELECT claim_status, claim_token FROM evo.kanban_cards WHERE id = $1`
+	const sql = `SELECT claim_status, claim_token, archived_at FROM evo.kanban_cards WHERE id = $1`
 	var status string
 	var dbToken *string
-	if err := s.evoPool.QueryRow(ctx, sql, cardID).Scan(&status, &dbToken); err != nil {
+	var archivedAt *time.Time
+	if err := s.evoPool.QueryRow(ctx, sql, cardID).Scan(&status, &dbToken, &archivedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeEvoErr(w, http.StatusNotFound, "card not found")
 			return false
 		}
 		writeEvoErr(w, http.StatusInternalServerError, "card lookup: "+err.Error())
+		return false
+	}
+	if archivedAt != nil {
+		writeEvoErr(w, http.StatusConflict, "card is archived")
 		return false
 	}
 	if status == "unclaimed" {
@@ -677,16 +701,16 @@ SELECT EXISTS(
 		moveSQL = `
 UPDATE evo.kanban_cards
 SET column_id = $2, position = $3, updated_at = now()
-WHERE id = $1
+WHERE id = $1 AND archived_at IS NULL
 RETURNING ` + cardColumns
 		args = []any{cardID, req.TargetColumnID, *req.Position}
 	} else {
 		moveSQL = `
 UPDATE evo.kanban_cards
 SET column_id = $2,
-    position  = COALESCE((SELECT MAX(position) + 1 FROM evo.kanban_cards WHERE column_id = $2), 0),
+    position  = COALESCE((SELECT MAX(position) + 1 FROM evo.kanban_cards WHERE column_id = $2 AND archived_at IS NULL), 0),
     updated_at = now()
-WHERE id = $1
+WHERE id = $1 AND archived_at IS NULL
 RETURNING ` + cardColumns
 		args = []any{cardID, req.TargetColumnID}
 	}
@@ -741,12 +765,13 @@ SET claim_status   = 'done',
         WHERE inner_c.column_id = (
             SELECT id FROM evo.kanban_columns
             WHERE board_id = evo.kanban_cards.board_id
-            ORDER BY position DESC LIMIT 1)), 0),
+            ORDER BY position DESC LIMIT 1)
+          AND inner_c.archived_at IS NULL), 0),
     result_summary = NULLIF($2, ''),
     result_task_id = NULLIF($3, ''),
     result_pr_url  = NULLIF($4, ''),
     updated_at     = now()
-WHERE id = $1
+WHERE id = $1 AND archived_at IS NULL
 RETURNING ` + cardColumns
 	c, err := scanCard(s.evoPool.QueryRow(ctx, completeSQL,
 		cardID, req.ResultSummary, req.ResultTaskID, req.ResultPRURL))
@@ -793,7 +818,7 @@ SET claim_status = 'unclaimed',
     claim_token  = NULL,
     claimed_at   = NULL,
     updated_at   = now()
-WHERE id = $1
+WHERE id = $1 AND archived_at IS NULL
 RETURNING ` + cardColumns
 	c, err := scanCard(s.evoPool.QueryRow(ctx, releaseSQL, cardID))
 	if err != nil {
@@ -805,6 +830,135 @@ RETURNING ` + cardColumns
 		return
 	}
 	writeEvoJSON(w, c)
+}
+
+// archiveKanbanCard soft-archives a completed card. It intentionally refuses
+// active work: archive is for completed backlog hygiene, while delete remains
+// the explicit destructive cleanup path.
+func (s *APIServer) archiveKanbanCard(w http.ResponseWriter, r *http.Request) {
+	if s.evoPool == nil {
+		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
+		return
+	}
+	cardID := mux.Vars(r)["cid"]
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancel()
+
+	const archiveSQL = `
+UPDATE evo.kanban_cards
+SET archived_at = now(), updated_at = now()
+WHERE id = $1
+  AND claim_status = 'done'
+  AND archived_at IS NULL
+RETURNING ` + cardColumns
+	c, err := scanCard(s.evoPool.QueryRow(ctx, archiveSQL, cardID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			var status string
+			var archivedAt *time.Time
+			lookupErr := s.evoPool.QueryRow(ctx,
+				`SELECT claim_status, archived_at FROM evo.kanban_cards WHERE id = $1`,
+				cardID).Scan(&status, &archivedAt)
+			if errors.Is(lookupErr, pgx.ErrNoRows) {
+				writeEvoErr(w, http.StatusNotFound, "card not found")
+				return
+			}
+			if lookupErr != nil {
+				writeEvoErr(w, http.StatusInternalServerError, "card lookup: "+lookupErr.Error())
+				return
+			}
+			if archivedAt != nil {
+				writeEvoErr(w, http.StatusConflict, "card is already archived")
+				return
+			}
+			writeEvoErr(w, http.StatusConflict, "only completed cards can be archived")
+			return
+		}
+		writeEvoErr(w, http.StatusInternalServerError, "archive: "+err.Error())
+		return
+	}
+	writeEvoJSON(w, c)
+}
+
+func (s *APIServer) restoreKanbanCard(w http.ResponseWriter, r *http.Request) {
+	if s.evoPool == nil {
+		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
+		return
+	}
+	cardID := mux.Vars(r)["cid"]
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancel()
+
+	const restoreSQL = `
+UPDATE evo.kanban_cards
+SET archived_at = NULL, updated_at = now()
+WHERE id = $1
+  AND archived_at IS NOT NULL
+RETURNING ` + cardColumns
+	c, err := scanCard(s.evoPool.QueryRow(ctx, restoreSQL, cardID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			var exists bool
+			if e := s.evoPool.QueryRow(ctx,
+				`SELECT EXISTS(SELECT 1 FROM evo.kanban_cards WHERE id = $1)`,
+				cardID).Scan(&exists); e == nil && !exists {
+				writeEvoErr(w, http.StatusNotFound, "card not found")
+				return
+			}
+			writeEvoErr(w, http.StatusConflict, "card is not archived")
+			return
+		}
+		writeEvoErr(w, http.StatusInternalServerError, "restore: "+err.Error())
+		return
+	}
+	writeEvoJSON(w, c)
+}
+
+// archiveDoneKanbanCards bulk-archives completed cards on one board. An
+// optional older_than_days threshold lets the UI keep recent completions visible
+// while clearing older done work.
+func (s *APIServer) archiveDoneKanbanCards(w http.ResponseWriter, r *http.Request) {
+	if s.evoPool == nil {
+		writeEvoErr(w, http.StatusServiceUnavailable, "evo pool not configured")
+		return
+	}
+	boardID := mux.Vars(r)["bid"]
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	var req cardArchiveDoneRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeEvoErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+			return
+		}
+	}
+	if req.OlderThanDays != nil && *req.OlderThanDays < 0 {
+		writeEvoErr(w, http.StatusBadRequest, "older_than_days cannot be negative")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+
+	olderThanDays := -1
+	if req.OlderThanDays != nil {
+		olderThanDays = *req.OlderThanDays
+	}
+	const archiveSQL = `
+UPDATE evo.kanban_cards
+SET archived_at = now(), updated_at = now()
+WHERE board_id = $1
+  AND claim_status = 'done'
+  AND archived_at IS NULL
+  AND ($2 < 0 OR updated_at < now() - ($2 * INTERVAL '1 day'))`
+	tag, err := s.evoPool.Exec(ctx, archiveSQL, boardID, olderThanDays)
+	if err != nil {
+		writeEvoErr(w, http.StatusInternalServerError, "archive done: "+err.Error())
+		return
+	}
+	writeEvoJSON(w, map[string]any{
+		"archived": tag.RowsAffected(),
+		"board_id": boardID,
+	})
 }
 
 // ---- comments --------------------------------------------------------------
@@ -954,15 +1108,20 @@ func (s *APIServer) updateKanbanCard(w http.ResponseWriter, r *http.Request) {
 	// Lock the row so the claim/move handlers can't change claim_status or
 	// column under us between the guard checks and the UPDATE.
 	var boardID, claimStatus string
+	var archivedAt *time.Time
 	err = tx.QueryRow(ctx,
-		`SELECT board_id, claim_status FROM evo.kanban_cards WHERE id = $1 FOR UPDATE`,
-		cardID).Scan(&boardID, &claimStatus)
+		`SELECT board_id, claim_status, archived_at FROM evo.kanban_cards WHERE id = $1 FOR UPDATE`,
+		cardID).Scan(&boardID, &claimStatus, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeEvoErr(w, http.StatusNotFound, "card not found")
 		return
 	}
 	if err != nil {
 		writeEvoErr(w, http.StatusInternalServerError, "lookup: "+err.Error())
+		return
+	}
+	if archivedAt != nil {
+		writeEvoErr(w, http.StatusConflict, "card is archived")
 		return
 	}
 
@@ -1004,7 +1163,7 @@ func (s *APIServer) updateKanbanCard(w http.ResponseWriter, r *http.Request) {
 		col := arg(*req.ColumnID)
 		sets = append(sets,
 			"column_id = "+col,
-			"position = COALESCE((SELECT MAX(position) + 1 FROM evo.kanban_cards WHERE column_id = "+col+"), 0)")
+			"position = COALESCE((SELECT MAX(position) + 1 FROM evo.kanban_cards WHERE column_id = "+col+" AND archived_at IS NULL), 0)")
 	}
 
 	c, err := scanCard(tx.QueryRow(ctx,
