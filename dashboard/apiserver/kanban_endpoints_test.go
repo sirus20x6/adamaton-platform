@@ -550,3 +550,71 @@ func TestKanbanDeleteBoard(t *testing.T) {
 		"/api/v1/kanban/boards/"+fx.boardID, "")
 	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
 }
+
+// TestKanbanReady_includeBacklogSurfacesUnpromotedCards covers the failure that
+// motivated the include_backlog parameter: an agent polls the claim queue,
+// gets an empty list, and concludes there is no work -- while the board's
+// Backlog is full of cards nobody promoted to Ready. An empty queue is not
+// evidence of an empty board, and before this parameter existed there was no
+// way for a caller to tell the two apart.
+func TestKanbanReady_includeBacklogSurfacesUnpromotedCards(t *testing.T) {
+	s := newDBTestServer(t)
+	fx := seedKanban(t, s.evoPool)
+	ctx := context.Background()
+
+	// A Backlog column (is_ready = false) holding one unclaimed card, which is
+	// exactly the shape of a staged-but-unpromoted backlog.
+	backlogCol := "col-" + uuid.NewString()[:8]
+	_, err := s.evoPool.Exec(ctx, `
+		INSERT INTO evo.kanban_columns (id, board_id, name, position, is_ready)
+		VALUES ($1, $2, 'Backlog', 2, false)`, backlogCol, fx.boardID)
+	require.NoError(t, err)
+
+	backlogCard := "card-" + uuid.NewString()[:8]
+	_, err = s.evoPool.Exec(ctx, `
+		INSERT INTO evo.kanban_cards (id, column_id, board_id, title, body, priority, difficulty, position)
+		VALUES ($1, $2, $3, 'backlogged', 'body', 'normal', 'medium', 0)`,
+		backlogCard, backlogCol, fx.boardID)
+	require.NoError(t, err)
+
+	readList := func(query string) []Card {
+		t.Helper()
+		rr := serveVia(s, s.registerKanbanEndpoints, http.MethodGet,
+			"/api/v1/kanban/boards/"+fx.boardID+"/ready"+query, "")
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var out []Card
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+		return out
+	}
+
+	ids := func(cards []Card) []string {
+		out := make([]string, 0, len(cards))
+		for _, c := range cards {
+			out = append(out, c.ID)
+		}
+		return out
+	}
+
+	// Default is unchanged: Ready only. Existing callers keep the queue they
+	// were written against.
+	base := readList("")
+	require.Contains(t, ids(base), fx.cardID)
+	require.NotContains(t, ids(base), backlogCard,
+		"default queue must stay Ready-only so existing agents do not change behaviour")
+
+	// Opting in surfaces the backlogged card. This is the assertion that fails
+	// before the change.
+	widened := readList("?include_backlog=true")
+	require.Contains(t, ids(widened), backlogCard,
+		"include_backlog must surface unclaimed cards outside the Ready column")
+	require.Contains(t, ids(widened), fx.cardID)
+
+	// Ready still sorts first, so promoting a card keeps meaning "do this
+	// next" -- the parameter changes what is visible, not what is preferred.
+	require.Equal(t, fx.cardID, widened[0].ID,
+		"ready cards must sort ahead of backlogged ones")
+
+	// A malformed value degrades to the historical behaviour rather than
+	// silently widening what agents may claim.
+	require.NotContains(t, ids(readList("?include_backlog=banana")), backlogCard)
+}

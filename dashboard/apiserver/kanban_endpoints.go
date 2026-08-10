@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -577,13 +578,29 @@ RETURNING ` + cardColumns
 	writeEvoJSONStatus(w, http.StatusCreated, c)
 }
 
+// readyCardsSQL lists the claim queue. $2 widens it past the Ready column:
+// false keeps the historical Ready-only behaviour, true also returns unclaimed
+// cards from every other column on the board.
+//
+// WHY THE WIDENING EXISTS. An agent polling this endpoint reads an empty result
+// as "no work available". Under Ready-only filtering that is wrong whenever a
+// board stages work in Backlog and nobody promotes it: the queue reads empty
+// while the backlog is full, so the agent reports itself blocked and every
+// pre-existing card stays invisible indefinitely. An empty queue is not
+// evidence of an empty board.
+//
+// Ready still sorts first, so promoting a card keeps meaning "do this next" --
+// the widening changes what is VISIBLE, not what is preferred. Completed work
+// cannot leak in regardless of column, because claim_status must be
+// 'unclaimed'.
 const readyCardsSQL = `
 SELECT ` + cardColumns + `
 FROM evo.kanban_cards
 WHERE board_id = $1
   AND archived_at IS NULL
   AND claim_status = 'unclaimed'
-  AND column_id IN (SELECT id FROM evo.kanban_columns WHERE board_id = $1 AND is_ready = true)
+  AND ($2::boolean OR column_id IN (
+      SELECT id FROM evo.kanban_columns WHERE board_id = $1 AND is_ready = true))
   AND NOT EXISTS (
       SELECT 1
       FROM evo.kanban_card_links l
@@ -592,7 +609,10 @@ WHERE board_id = $1
         AND l.link_type = 'blocks'
         AND blocker.claim_status <> 'done'
   )
-ORDER BY position ASC, created_at ASC`
+ORDER BY
+  (column_id IN (SELECT id FROM evo.kanban_columns
+                 WHERE board_id = $1 AND is_ready = true)) DESC,
+  position ASC, created_at ASC`
 
 func (s *APIServer) listReadyCards(w http.ResponseWriter, r *http.Request) {
 	if s.evoPool == nil {
@@ -603,7 +623,13 @@ func (s *APIServer) listReadyCards(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	rows, err := s.evoPool.Query(ctx, readyCardsSQL, boardID)
+	// Opt-in so existing callers keep the Ready-only queue they were written
+	// against. Anything other than a true-ish value means Ready-only, so a
+	// malformed query string degrades to the historical behaviour rather than
+	// silently widening what agents can claim.
+	includeBacklog, _ := strconv.ParseBool(r.URL.Query().Get("include_backlog"))
+
+	rows, err := s.evoPool.Query(ctx, readyCardsSQL, boardID, includeBacklog)
 	if err != nil {
 		writeEvoErr(w, http.StatusInternalServerError, "query: "+err.Error())
 		return
